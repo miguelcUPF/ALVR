@@ -19,6 +19,7 @@ use alvr_common::{
     wait_rwlock, warn, AnyhowToCon, ConResult, ConnectionError, ConnectionState, LifecycleState,
     OptLazy, ToCon, ALVR_VERSION,
 };
+
 use alvr_packets::{
     ClientConnectionResult, ClientControlPacket, ClientStatistics, Haptics, ServerControlPacket,
     StreamConfigPacket, Tracking, VideoPacketHeader, VideoStreamingCapabilities, AUDIO, HAPTICS,
@@ -78,6 +79,26 @@ pub static CONTROL_SENDER: OptLazy<ControlSocketSender<ClientControlPacket>> =
 pub static TRACKING_SENDER: OptLazy<StreamSender<Tracking>> = alvr_common::lazy_mut_none();
 pub static STATISTICS_SENDER: OptLazy<StreamSender<ClientStatistics>> =
     alvr_common::lazy_mut_none();
+
+#[derive(Copy, Clone)]
+pub struct VideoStatistics{
+    frame_span: Duration,
+    frame_shard_interval_average: Duration,
+    
+    reception_interval: Duration,
+
+    bytes_received: usize,
+    shards_received: usize,
+
+    frames_lost_discarded: usize,
+    frames_discarded: usize,
+    frames_dropped: usize, 
+
+    shards_duplicated: usize,
+
+    highest_frame_index: u32,
+    highest_shard_index: u32,
+}
 
 fn set_hud_message(message: &str) {
     let message = format!(
@@ -300,6 +321,13 @@ fn connection_pipeline(
 
     let video_receive_thread = thread::spawn(move || {
         let mut stream_corrupted = false;
+        let Duration reception_interval = Duration::ZERO;
+        let usize bytes_received = 0;
+        let usize shards_received = 0;
+        let usize packets_lost_discarded = 0;
+        let usize packets_discarded = 0;
+        let usize packets_dropped = 0;
+        let usize shards_duplicated = 0;
         while is_streaming() {
             let data = match video_receiver.recv(STREAMING_RECV_TIMEOUT) {
                 Ok(data) => data,
@@ -311,18 +339,23 @@ fn connection_pipeline(
             };
 
             if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
-                stats.report_video_packet_received(header.timestamp);
+                stats.report_frame_received(header.timestamp);
             }
 
             if header.is_idr {
                 stream_corrupted = false;
-            } else if data.had_packet_loss() {
+            } else if data.get_packets_lost_discarded() != 0 {
                 stream_corrupted = true;
-                if let Some(sender) = &mut *CONTROL_SENDER.lock() {
-                    sender.send(&ClientControlPacket::RequestIdr).ok();
-                }
-                warn!("Network dropped video packet");
+            
+                warn!("Network lost or delayed video packet/s: {}", data.get_packets_lost_discarded());
             }
+
+            reception_interval += data.get_reception_interval();
+            bytes_received += data.get_bytes_received();
+            shards_received += data.get_shards_received();
+            packets_lost_discarded += data.get_packets_lost_discarded();
+            packets_discarded += data.get_packets_discarded();
+            shards_duplicated += data.get_shards_duplicated();
 
             if !stream_corrupted || !settings.connection.avoid_video_glitching {
                 if !decoder::push_nal(header.timestamp, nal) {
@@ -330,12 +363,44 @@ fn connection_pipeline(
                     if let Some(sender) = &mut *CONTROL_SENDER.lock() {
                         sender.send(&ClientControlPacket::RequestIdr).ok();
                     }
+                    packets_dropped += 1;
                     warn!("Dropped video packet. Reason: Decoder saturation")
+                } else{
+                    let mut video_stats = VideoStatistics{
+                        frame_span: data.get_packet_span(),
+                        frame_shard_interval_average: data.get_packet_shard_interval_average(),
+
+                        reception_interval: reception_interval,
+
+                        bytes_received: bytes_received,
+                        shards_received: shards_received,
+
+                        frames_lost_discarded: packets_lost_discarded,
+                        frames_discarded: packets_discarded,
+                        frames_dropped: packets_dropped, 
+
+                        shards_duplicated: shards_duplicated,
+
+                        highest_frame_index: data.get_highest_packet_index(),
+                        highest_shard_index: data.get_highest_shard_index(),
+                    }; 
+        
+                    if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
+                        stats.report_video_statistics(header.timestamp, video_stats);
+                    }
+                    reception_interval = Duration::ZERO;
+                    bytes_received = 0;
+                    shards_received = 0;
+                    packets_lost_discarded = 0;
+                    packets_discarded = 0;
+                    packets_dropped = 0;
+                    shards_duplicated = 0;
                 }
             } else {
                 if let Some(sender) = &mut *CONTROL_SENDER.lock() {
                     sender.send(&ClientControlPacket::RequestIdr).ok();
                 }
+                packets_dropped += 1;
                 warn!("Dropped video packet. Reason: Waiting for IDR frame")
             }
         }

@@ -36,6 +36,7 @@ pub struct NominalBitrateStats {
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct GraphStatistics {
+    // Latency metrics
     pub total_pipeline_latency_s: f32,
     pub game_time_s: f32,
     pub server_compositor_s: f32,

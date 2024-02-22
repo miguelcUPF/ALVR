@@ -192,13 +192,38 @@ pub enum ClientListAction {
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct ClientStatistics {
-    pub target_timestamp: Duration, // identifies the frame
+    // Frame statistics
+    //// Frame data
+    pub target_timestamp: Duration, // Identifies the frame
+
+    //// Frame timing metrics
     pub frame_interval: Duration,
+    pub frame_interval_decode: Duration,
+    pub frame_interval_vsync: Duration,
+    pub frame_span: Duration,
+    pub frame_shard_interval_average: Duration,
+
+    //// Latency metrics
     pub video_decode: Duration,
     pub video_decoder_queue: Duration,
     pub rendering: Duration,
     pub vsync_queue: Duration,
     pub total_pipeline_latency: Duration,
+
+    // Interval video statistics
+    pub reception_interval: Duration,
+
+    pub bytes_received: usize, // including prefix
+    pub shards_received: usize,
+
+    pub frames_lost_discarded: usize,
+    pub frames_discarded: usize,
+    pub frames_dropped: usize,
+
+    pub shards_duplicated: usize,
+
+    pub highest_frame_index: u32,
+    pub highest_shard_index: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

@@ -1,3 +1,4 @@
+use crate::connection::VideoStatistics;
 use alvr_common::SlidingWindowAverage;
 use alvr_packets::ClientStatistics;
 use std::{
@@ -7,13 +8,15 @@ use std::{
 
 struct HistoryFrame {
     input_acquired: Instant,
-    video_packet_received: Instant,
+    frame_received: Instant,
+
     client_stats: ClientStatistics,
 }
-
 pub struct StatisticsManager {
     history_buffer: VecDeque<HistoryFrame>,
     max_history_size: usize,
+    prev_frame: Instant,
+    prev_decode: Instant,
     prev_vsync: Instant,
     total_pipeline_latency_average: SlidingWindowAverage<Duration>,
     steamvr_pipeline_latency: Duration,
@@ -28,6 +31,8 @@ impl StatisticsManager {
         Self {
             max_history_size,
             history_buffer: VecDeque::new(),
+            prev_frame: Instant::now(),
+            prev_decode: Instant::now(),
             prev_vsync: Instant::now(),
             total_pipeline_latency_average: SlidingWindowAverage::new(
                 Duration::ZERO,
@@ -47,8 +52,7 @@ impl StatisticsManager {
         {
             self.history_buffer.push_front(HistoryFrame {
                 input_acquired: Instant::now(),
-                // this is just a placeholder because Instant does not have a default value
-                video_packet_received: Instant::now(),
+                frame_received: Instant::now(),
                 client_stats: ClientStatistics {
                     target_timestamp,
                     ..Default::default()
@@ -61,13 +65,42 @@ impl StatisticsManager {
         }
     }
 
-    pub fn report_video_packet_received(&mut self, target_timestamp: Duration) {
+    pub fn report_frame_received(&mut self, target_timestamp: Duration) {
         if let Some(frame) = self
             .history_buffer
             .iter_mut()
             .find(|frame| frame.client_stats.target_timestamp == target_timestamp)
         {
-            frame.video_packet_received = Instant::now();
+            frame.frame_received = Instant::now();
+
+            frame.client_stats.frame_interval = 
+                Instant::now().saturating_duration_since(self.prev_frame);
+            self.prev_frame = Instant::now();
+        }
+    }
+
+    pub fn report_video_statistics(&mut self, target_timestamp: Duration, stats: VideoStatistics) {
+        if let Some(frame) = self
+            .history_buffer
+            .iter_mut()
+            .find(|frame| frame.client_stats.target_timestamp == target_timestamp)
+        {
+            frame.client_stats.frame_span = stats.frame_span;
+            frame.client_stats.frame_shard_interval_average = stats.frame_shard_interval_average;
+
+            frame.client_stats.reception_interval = stats.reception_interval;
+            
+            frame.client_stats.bytes_received = stats.bytes_received;
+            frame.client_stats.shards_received = stats.shards_received;
+
+            frame.client_stats.frames_lost_discarded = stats.frames_lost_discarded;
+            frame.client_stats.frames_discarded = stats.frames_discarded;
+            frame.client_stats.frames_dropped = stats.frames_dropped;
+
+            frame.client_stats.shards_duplicated = stats.shards_duplicated;
+            
+            frame.client_stats.highest_frame_index = stats.highest_frame_index;
+            frame.client_stats.highest_shard_index = stats.highest_shard_index;
         }
     }
 
@@ -78,7 +111,11 @@ impl StatisticsManager {
             .find(|frame| frame.client_stats.target_timestamp == target_timestamp)
         {
             frame.client_stats.video_decode =
-                Instant::now().saturating_duration_since(frame.video_packet_received);
+                Instant::now().saturating_duration_since(frame.frame_received);
+            
+            frame.client_stats.frame_interval_decode = Instant::now().saturating_duration_since(self.prev_decode);
+            self.prev_decode = Instant::now();
+
         }
     }
 
@@ -89,7 +126,7 @@ impl StatisticsManager {
             .find(|frame| frame.client_stats.target_timestamp == target_timestamp)
         {
             frame.client_stats.video_decoder_queue = Instant::now().saturating_duration_since(
-                frame.video_packet_received + frame.client_stats.video_decode,
+                frame.frame_received + frame.client_stats.video_decode,
             );
         }
     }
@@ -105,7 +142,7 @@ impl StatisticsManager {
             .find(|frame| frame.client_stats.target_timestamp == target_timestamp)
         {
             frame.client_stats.rendering = now.saturating_duration_since(
-                frame.video_packet_received
+                frame.frame_received
                     + frame.client_stats.video_decode
                     + frame.client_stats.video_decoder_queue,
             );
@@ -116,7 +153,7 @@ impl StatisticsManager {
                 .submit_sample(frame.client_stats.total_pipeline_latency);
 
             let vsync = now + vsync_queue;
-            frame.client_stats.frame_interval = vsync.saturating_duration_since(self.prev_vsync);
+            frame.client_stats.frame_interval_vsync = vsync.saturating_duration_since(self.prev_vsync);
             self.prev_vsync = vsync;
         }
     }

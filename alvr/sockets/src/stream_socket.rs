@@ -89,8 +89,7 @@ pub struct StreamSender<H> {
     inner: Arc<Mutex<Box<dyn SocketWriter>>>,
     stream_id: u16,
     max_packet_size: usize,
-    // if the packet index overflows the worst that happens is a false positive packet loss
-    next_packet_index: u32,
+    prev_packet_index: u32,
     used_buffers: Vec<Vec<u8>>,
     _phantom: PhantomData<H>,
 }
@@ -103,6 +102,12 @@ impl<H> StreamSender<H> {
         let actual_buffer_size = buffer.hidden_offset + buffer.length;
         let data_size = actual_buffer_size - SHARD_PREFIX_SIZE;
         let shards_count = (data_size as f32 / max_shard_data_size as f32).ceil() as usize;
+
+        let packet_index = self.prev_packet_index + 1;
+        if packet_index == u32::MAX {
+            // If the next index is the maximum value, wrap around to 0
+            packet_index = 0;
+        }
 
         for idx in 0..shards_count {
             // this overlaps with the previous shard, this is intended behavior and allows to
@@ -121,14 +126,14 @@ impl<H> StreamSender<H> {
             sub_buffer[0..4]
                 .copy_from_slice(&((packet_length - mem::size_of::<u32>()) as u32).to_be_bytes());
             sub_buffer[4..6].copy_from_slice(&self.stream_id.to_be_bytes());
-            sub_buffer[6..10].copy_from_slice(&self.next_packet_index.to_be_bytes());
+            sub_buffer[6..10].copy_from_slice(&packet_index.to_be_bytes());
             sub_buffer[10..14].copy_from_slice(&(shards_count as u32).to_be_bytes());
             sub_buffer[14..18].copy_from_slice(&(idx as u32).to_be_bytes());
 
             self.inner.lock().send(&sub_buffer[..packet_length])?;
         }
 
-        self.next_packet_index += 1;
+        self.prev_packet_index = packet_index;
 
         self.used_buffers.push(buffer.inner);
 
@@ -165,15 +170,73 @@ impl<H: Serialize> StreamSender<H> {
 
 pub struct ReceiverData<H> {
     buffer: Option<Vec<u8>>,
-    size: usize, // counting the prefix
+    size: usize, // including the prefix
+
     used_buffer_queue: mpsc::Sender<Vec<u8>>,
-    had_packet_loss: bool,
     _phantom: PhantomData<H>,
+
+    // Packet metrics
+    packet_span: Duration,
+    packet_shard_interval_average: Duration,
+
+    reception_interval: Duration,
+
+    bytes_received: usize,
+    shards_received: usize,
+
+    packets_lost_discarded: usize,
+    packets_discarded: usize,
+
+    shards_duplicated: usize,
+
+    highest_packet_index: u32,
+    highest_shard_index: u32,
 }
 
 impl<H> ReceiverData<H> {
-    pub fn had_packet_loss(&self) -> bool {
-        self.had_packet_loss
+    
+    pub fn get_size(&self) -> usize {
+        self.size
+    }
+
+    pub fn get_packet_span(&self) -> Duration {
+        self.packet_span
+    }
+
+    pub fn get_packet_shard_interval_average(&self) -> Duration {
+        self.packet_shard_interval_average
+    }
+
+    pub fn get_reception_interval(&self) -> usize {
+        self.reception_interval
+    }
+
+    pub fn get_bytes_received(&self) -> usize {
+        self.bytes_received
+    }
+
+    pub fn get_shards_received(&self) -> usize {
+        self.shards_received
+    }
+
+    pub fn get_packets_lost_discarded(&self) -> usize {
+        self.packets_lost_discarded
+    }
+
+    pub fn get_packets_discarded(&self) -> usize {
+        self.packets_discarded
+    }
+
+    pub fn get_shards_duplicated(&self) -> usize {
+        self.shards_duplicated
+    }
+
+    pub fn get_highest_packet_index(&self) -> usize {
+        self.highest_packet_index
+    }
+
+    pub fn get_highest_shard_index(&self) -> usize {
+        self.highest_shard_index
     }
 }
 
@@ -193,7 +256,7 @@ impl<H: DeserializeOwned> ReceiverData<H> {
 impl<H> Drop for ReceiverData<H> {
     fn drop(&mut self) {
         self.used_buffer_queue
-            .send(self.buffer.take().unwrap())
+            .send(self.buffer.t: boolake().unwrap())
             .ok();
     }
 }
@@ -201,14 +264,32 @@ impl<H> Drop for ReceiverData<H> {
 struct ReconstructedPacket {
     index: u32,
     buffer: Vec<u8>,
-    size: usize, // contains prefix
+    size: usize, // including the prefix
+
+    // Packet metrics
+    packet_span: Duration,
+    packet_shard_interval_average: Duration,
+
+    reception_interval: Duration,
+
+    bytes_received: usize,
+    shards_received: usize,
+
+    shards_duplicated: usize,
+
+    highest_packet_index: u32,
+    highest_shard_index: u32,
+
 }
 
 pub struct StreamReceiver<H> {
     packet_receiver: mpsc::Receiver<ReconstructedPacket>,
     used_buffer_queue: mpsc::Sender<Vec<u8>>,
-    last_packet_index: Option<u32>,
+    prev_packet_index: u32,
     _phantom: PhantomData<H>,
+
+    packets_lost_discarded: usize, // non-cumulative
+    packets_discarded: usize, // non-cumulative
 }
 
 fn wrapping_cmp(lhs: u32, rhs: u32) -> Ordering {
@@ -232,32 +313,52 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
             .recv_timeout(timeout)
             .handle_try_again()?;
 
-        let mut had_packet_loss = false;
-
-        if let Some(last_idx) = self.last_packet_index {
-            // Use wrapping arithmetics
-            match wrapping_cmp(packet.index, last_idx.wrapping_add(1)) {
-                Ordering::Equal => (),
-                Ordering::Greater => {
-                    // Skipped some indices
-                    had_packet_loss = true
-                }
-                Ordering::Less => {
-                    // Old packet, discard
-                    self.used_buffer_queue.send(packet.buffer).to_con()?;
-                    return alvr_common::try_again();
-                }
-            }
+        let mut packet_index = self.prev_packet_index + 1;
+        if packet_index == u32::MAX {
+            // If the next index is the maximum value, wrap around to 0
+            packet_index = 0;
         }
-        self.last_packet_index = Some(packet.index);
+
+    // Use wrapping arithmetics
+        match wrapping_cmp(packet.index, packet_index) {
+            Ordering::Equal => (),
+            Ordering::Greater => {
+                // Skipped some indices
+                self.packets_lost_discarded += packet.index.wrapping_sub(packet_index);
+            }
+            Ordering::Less => {
+                // Old packet, discard
+                self.packets_discarded  += 1;
+                self.used_buffer_queue.send(packet.buffer).to_con()?;
+                return alvr_common::try_again();
+            }
+
+        }
+
+        let lost_discarded = self.packets_lost_discarded;
+        let discarded = self.packets_discarded;
+        
+        self.prev_packet_index = packet.index;
+        self.packets_lost_discarded = 0;
+        self.packets_discarded = 0;
 
         Ok(ReceiverData {
             buffer: Some(packet.buffer),
             size: packet.size,
             used_buffer_queue: self.used_buffer_queue.clone(),
-            had_packet_loss,
             _phantom: PhantomData,
+            packet_span: packet.packet_span,
+            packet_shard_interval_average: packet.packet_shard_interval_average,
+            reception_interval: packet.reception_interval,
+            bytes_received: packet.bytes_received,
+            shards_received: packet.shards_received,
+            packets_lost_discarded: lost_discarded,
+            packets_discarded: discarded,
+            shards_duplicated: packet.shards_duplicated,
+            highest_packet_index: packet.highest_packet_index,
+            highest_shard_index: packet.highest_shard_index,
         })
+
     }
 }
 
@@ -323,6 +424,14 @@ impl StreamSocketBuilder {
             receive_socket,
             shard_recv_state: None,
             stream_recv_components: HashMap::new(),
+
+            packets_shard_instant: HashMap::new(),
+            prev_packet_instant: HashMap::new(),
+            bytes_received: HashMap::new(),
+            shards_received: HashMap::new(),
+            shards_duplicated: HashMap::new(),
+            highest_packet_index: HashMap::new(),
+            highest_shard_index: HashMap::new(),
         })
     }
 
@@ -368,6 +477,14 @@ impl StreamSocketBuilder {
             receive_socket,
             shard_recv_state: None,
             stream_recv_components: HashMap::new(),
+
+            packets_shard_instant: HashMap::new(),
+            prev_packet_instant: HashMap::new(),
+            bytes_received: HashMap::new(),
+            shards_received: HashMap::new(),
+            shards_duplicated: HashMap::new(),
+            highest_packet_index: HashMap::new(),
+            highest_shard_index: HashMap::new(),
         })
     }
 }
@@ -405,6 +522,15 @@ pub struct StreamSocket {
     receive_socket: Box<dyn SocketReader>,
     shard_recv_state: Option<RecvState>,
     stream_recv_components: HashMap<u16, StreamRecvComponents>,
+
+    // Streams metrics
+    packets_shard_instant: HashMap<u16, HashMap<u32, VecDeque<Instant>>>,
+    prev_packet_instant: HashMap<u16, Instant>,
+    bytes_received: HashMap<u16, usize>, // non-cumulative
+    shards_received: HashMap<u16, usize>, // non-cumulative
+    shards_duplicated: HashMap<u16, usize>, // non-cumulative
+    highest_packet_index: HashMap<u16, u32>, //todo
+    highest_shard_index: HashMap<u16, u32>, //todo
 }
 
 impl StreamSocket {
@@ -413,7 +539,7 @@ impl StreamSocket {
             inner: Arc::clone(&self.send_socket),
             stream_id,
             max_packet_size: self.max_packet_size,
-            next_packet_index: 0,
+            prev_packet_index: 0,
             used_buffers: vec![],
             _phantom: PhantomData,
         }
@@ -453,7 +579,9 @@ impl StreamSocket {
             packet_receiver,
             used_buffer_queue: used_buffer_sender,
             _phantom: PhantomData,
-            last_packet_index: None,
+            prev_packet_index: 0,
+            packets_lost_discarded: 0,
+            packets_discarded: 0,
         }
     }
 
@@ -469,12 +597,14 @@ impl StreamSocket {
 
             // todo: switch to little endian
             // todo: do not remove sizeof<u32> for packet length
-            let shard_length = mem::size_of::<u32>()
+            let shard_length: usize = mem::size_of::<u32>()
                 + u32::from_be_bytes(bytes[0..4].try_into().unwrap()) as usize;
             let stream_id = u16::from_be_bytes(bytes[4..6].try_into().unwrap());
             let packet_index = u32::from_be_bytes(bytes[6..10].try_into().unwrap());
             let shards_count = u32::from_be_bytes(bytes[10..14].try_into().unwrap()) as usize;
             let shard_index = u32::from_be_bytes(bytes[14..18].try_into().unwrap()) as usize;
+
+            let now = Instant::now();
 
             self.shard_recv_state.insert(RecvState {
                 shard_length,
@@ -584,14 +714,83 @@ impl StreamSocket {
                 .copy_from_slice(&shard_recv_state_mut.overwritten_data_backup.take().unwrap());
         }
 
+        let highest_packet_index = self.highest_packet_index.entry(shard_recv_state_mut.stream_id).or_insert(0);
+        let highest_shard_index = self.highest_shard_index.entry(shard_recv_state_mut.stream_id).or_insert(0);
+
+        if (*highest_packet_index == shard_recv_state_mut.packet_index) {
+            if (*highest_shard_index < shard_recv_state_mut.shard_index) {
+                *highest_shard_index = shard_recv_state_mut.shard_index;
+            } else{
+
+            }
+        } else if (*highest_packet_index < shard_recv_state_mut.packet_index) {
+            *highest_packet_index = shard_recv_state_mut.packet_index;
+            *highest_shard_index = shard_recv_state_mut.shard_index;
+        }
+
+        let bytes_received = self.bytes_received.entry(shard_recv_state_mut.stream_id).or_insert(0);
+        *bytes_received += shard_recv_state_mut.shard_length + SHARD_PREFIX_SIZE;
+
+        let shards_received = self.shards_received.entry(shard_recv_state_mut.stream_id).or_insert(0);
+        *shards_received += 1;
+        
+
         if !shard_recv_state_mut.should_discard {
-            in_progress_packet
-                .received_shard_indices
-                .insert(shard_recv_state_mut.shard_index);
+            if !in_progress_packet.received_shard_indices.contains(&shard_recv_state_mut.shard_index) {
+                in_progress_packet.received_shard_indices.insert(shard_recv_state_mut.shard_index);
+
+                self.packets_shard_instant.entry(shard_recv_state_mut.stream_id).
+                    or_insert_with(HashMap::new).entry(shard_recv_state_mut.packet_id).
+                    or_insert_with(VecDeque::new).push_back(now);
+            }
+            else {
+                let shards_duplicated = self.shards_duplicated.entry(shard_recv_state_mut.stream_id).or_insert(0);
+                *shards_duplicated += 1;
+            }
         }
 
         // Check if packet is complete and send
         if in_progress_packet.received_shard_indices.len() == shard_recv_state_mut.shards_count {
+            let mut reception_interval = Duration::from_secs(0);
+
+            let mut packet_span = Duration::from_secs(0);
+            let mut packet_shard_interval_average = Duration::from_secs(0);
+
+            if let Some(packet_instants) = self.packets_shard_instant.entry(shard_recv_state_mut.stream_id).remove(&shard_recv_state_mut.packet_id) {
+                let mut packet_shard_interval_sum = Duration::from_secs(0);
+                let mut packet_shard_count = packet_instants.len();
+
+                if shard_recv_state_mut.shards_count != packet_shard_count {
+                    debug!(
+                        "Shard instants for packet {} in stream {} not properly gathered.",
+                        shard_recv_state_mut.packet_id, shard_recv_state_mut.stream_id
+                    );
+                }
+
+                if let (Some(first_instant), Some(last_instant)) = (packet_instants.front(), packet_instants.back()) {
+
+                    let mut prev_instant = first_instant;
+                    packet_span = last_instant.duration_since(first_instant);
+            
+                    for &instant in packet_instants.iter().skip(1) {
+                        let interval = instant.duration_since(prev_instant);
+                        packet_shard_interval_sum += interval;
+                        prev_instant = instant;
+                    }
+            
+                    packet_shard_interval_average = if packet_shard_count > 1 {
+                        packet_shard_interval_sum / (packet_shard_count - 1) as u32
+                    };
+                    let prev_packet_instant = self.prev_packet_instant.entry(shard_recv_state_mut.stream_id).or_insert(first_instant);
+                    reception_interval = last_instant.duration_since(*prev_packet_instant);
+
+                    if last_instant != now { //remove
+                        debug!(
+                            "Something went wrong. Last instant is not equal to now!"
+                        );
+                    }
+            }
+
             let size = in_progress_packet.buffer_length;
             components
                 .packet_queue
@@ -603,8 +802,21 @@ impl StreamSocket {
                         .unwrap()
                         .buffer,
                     size,
+                    packet_span,
+                    packet_shard_interval_average,
+                    reception_interval,
+                    *bytes_received,
+                    *shards_received,
+                    *shards_duplicated,
+                    *highest_packet_index,
+                    *highest_shard_index,
                 })
                 .ok();
+            
+            *prev_packet_instant = now; // now should be equal to last_instant
+            *bytes_received = 0;
+            *shards_received = 0;
+            *shards_duplicated = 0;
 
             // Keep only shards with later packet index (using wrapping logic)
             while let Some((idx, _)) = components.in_progress_packets.iter().find(|(idx, _)| {
@@ -623,4 +835,5 @@ impl StreamSocket {
 
         Ok(())
     }
+}
 }
