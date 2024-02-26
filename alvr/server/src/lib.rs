@@ -375,7 +375,7 @@ pub unsafe extern "C" fn HmdDriverFactory(
 
     extern "C" fn report_present(timestamp_ns: u64, offset_ns: u64) {
         if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
-            stats.report_frame_present(
+            stats.report_frame_presented(
                 Duration::from_nanos(timestamp_ns),
                 Duration::from_nanos(offset_ns),
             );

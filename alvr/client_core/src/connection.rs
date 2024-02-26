@@ -82,22 +82,22 @@ pub static STATISTICS_SENDER: OptLazy<StreamSender<ClientStatistics>> =
 
 #[derive(Copy, Clone)]
 pub struct VideoStatistics{
-    frame_span: Duration,
-    frame_shard_interval_average: Duration,
+    pub frame_span: Duration,
+    pub frame_shard_interval_average: Duration,
     
-    reception_interval: Duration,
+    pub reception_interval: Duration,
 
-    bytes_received: usize,
-    shards_received: usize,
+    pub bytes_received: usize,
+    pub shards_received: usize,
 
-    frames_lost_discarded: usize,
-    frames_discarded: usize,
-    frames_dropped: usize, 
+    pub frames_lost_discarded: usize,
+    pub frames_discarded: usize,
+    pub frames_dropped: usize, 
 
-    shards_duplicated: usize,
+    pub shards_duplicated: usize,
 
-    highest_frame_index: u32,
-    highest_shard_index: u32,
+    pub highest_frame_index: u32,
+    pub highest_shard_index: usize,
 }
 
 fn set_hud_message(message: &str) {
@@ -321,13 +321,13 @@ fn connection_pipeline(
 
     let video_receive_thread = thread::spawn(move || {
         let mut stream_corrupted = false;
-        let Duration reception_interval = Duration::ZERO;
-        let usize bytes_received = 0;
-        let usize shards_received = 0;
-        let usize packets_lost_discarded = 0;
-        let usize packets_discarded = 0;
-        let usize packets_dropped = 0;
-        let usize shards_duplicated = 0;
+        let mut reception_interval = Duration::ZERO;
+        let mut bytes_received = 0;
+        let mut shards_received = 0;
+        let mut packets_lost_discarded = 0;
+        let mut packets_discarded = 0;
+        let mut packets_dropped = 0;
+        let mut shards_duplicated = 0;
         while is_streaming() {
             let data = match video_receiver.recv(STREAMING_RECV_TIMEOUT) {
                 Ok(data) => data,
@@ -366,7 +366,7 @@ fn connection_pipeline(
                     packets_dropped += 1;
                     warn!("Dropped video packet. Reason: Decoder saturation")
                 } else{
-                    let mut video_stats = VideoStatistics{
+                    let video_stats = VideoStatistics{
                         frame_span: data.get_packet_span(),
                         frame_shard_interval_average: data.get_packet_shard_interval_average(),
 

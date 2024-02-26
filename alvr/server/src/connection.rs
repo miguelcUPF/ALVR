@@ -602,6 +602,14 @@ fn connection_pipeline(
                     .get_range_mut(0, payload.len())
                     .copy_from_slice(&payload);
                 video_sender.send(buffer).ok();
+
+                let packet_index = video_sender.get_prev_packet_index();
+                let shards_bytes = video_sender.get_shards_bytes();
+                let shards_instant = video_sender.get_shards_instant();
+
+                if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
+                    stats.report_frame_transmitted(header.timestamp, packet_index, shards_bytes, shards_instant);
+                }
             }
         }
     });
@@ -956,7 +964,7 @@ fn connection_pipeline(
                     let timestamp = client_stats.target_timestamp;
                     let decoder_latency = client_stats.video_decode;
                     let network_latency = stats.report_statistics(client_stats);
-
+                    // TODO: remove bottom if not needed, define which are needed in bitrate manager
                     let server_data_lock = SERVER_DATA_MANAGER.read();
                     BITRATE_MANAGER.lock().report_frame_latencies(
                         &server_data_lock.settings().video.bitrate.mode,
@@ -1059,9 +1067,6 @@ fn connection_pipeline(
                     }
                     ClientControlPacket::VideoErrorReport => {
                         // legacy endpoint. todo: remove
-                        if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
-                            stats.report_packet_loss();
-                        }
                         unsafe { crate::VideoErrorReportReceive() };
                     }
                     ClientControlPacket::ViewsConfig(config) => unsafe {
@@ -1335,12 +1340,11 @@ pub extern "C" fn send_video(timestamp_ns: u64, buffer_ptr: *mut u8, len: i32, i
         }
 
         if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
-            let encoder_latency =
-                stats.report_frame_encoded(Duration::from_nanos(timestamp_ns), buffer_size);
-
+            let encoder_latency = stats.report_frame_encoded(timestamp, buffer_size, is_idr);
+            // TODO: remove bottom or decide for why to used
             BITRATE_MANAGER
                 .lock()
-                .report_frame_encoded(timestamp, encoder_latency, buffer_size);
+                .report_frame_encoded(timestamp, encoder_latency, buffer_size); // TODO: remove?
         }
     }
 }

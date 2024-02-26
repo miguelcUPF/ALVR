@@ -229,7 +229,7 @@ impl StatisticsTab {
         let mut data = statistics::Data::new(
             self.history
                 .iter()
-                .map(|stats| stats.actual_bitrate_bps as f64)
+                .map(|stats| stats.mbits_sent_per_sec as f64)
                 .collect::<Vec<_>>(),
         );
 
@@ -270,7 +270,7 @@ impl StatisticsTab {
                     }
                     requested.push(to_screen_trans * pos2(i as f32, nom_br.requested_bps / 1e6));
                     actual.push(
-                        to_screen_trans * pos2(i as f32, self.history[i].actual_bitrate_bps / 1e6),
+                        to_screen_trans * pos2(i as f32, self.history[i].mbits_sent_per_sec / 1e6),
                     );
                 }
 
@@ -327,7 +327,7 @@ impl StatisticsTab {
                 maybe_label(
                     ui,
                     "Actual recorded",
-                    Some(stats.actual_bitrate_bps),
+                    Some(stats.mbits_sent_per_sec),
                     theme::FG,
                 );
             },
@@ -338,41 +338,74 @@ impl StatisticsTab {
         ui.add_space(10.0);
 
         ui.columns(2, |ui| {
-            ui[0].label("Total packets:");
+            ui[0].label("Total frames sent:");
             ui[1].label(&format!(
-                "{} packets ({} packets/s)",
-                statistics.video_packets_total, statistics.video_packets_per_sec
+                "{} frames",
+                statistics.total_frames_sent
+            ));
+
+            ui[0].label("Total frames received:");
+            ui[1].label(&format!(
+                "{} frames",
+                statistics.total_frames_received
+            ));
+
+            ui[0].label("Total shards sent:");
+            ui[1].label(&format!(
+                "{} sjards ({} shards/s)",
+                statistics.total_shards_sent, statistics.shards_sent_per_sec
+            ));
+
+            ui[0].label("Total shards received:");
+            ui[1].label(&format!(
+                "{} shards ({} shards/s)",
+                statistics.total_shards_received, statistics.shards_received_per_sec
             ));
 
             ui[0].label("Total sent:");
-            ui[1].label(&format!("{} MB", statistics.video_mbytes_total));
+            ui[1].label(&format!("{} Mb", statistics.total_mbits_sent));
+
+            ui[0].label("Total received:");
+            ui[1].label(&format!("{} Mb", statistics.total_mbits_received));
 
             ui[0].label("Bitrate:");
-            ui[1].label(&format!("{:.1} Mbps", statistics.video_mbits_per_sec));
+            ui[1].label(&format!("{:.1} Mbps", statistics.mbits_sent_per_sec));
+
+            ui[0].label("Throughput:");
+            ui[1].label(&format!("{:.1} Mbps", statistics.mbits_received_per_sec));
+
+            ui[0].label("Game delay:");
+            ui[1].label(&format!("{:.2} ms", statistics.game_delay_average_ms));
+
+            ui[0].label("Server compositor delay:");
+            ui[1].label(&format!("{:.2} ms", statistics.server_compositor_delay_average_ms));
+
+            ui[0].label("Encoder delay:");
+            ui[1].label(&format!("{:.2} ms", statistics.encode_delay_average_ms));
+
+            ui[0].label("Network delay:");
+            ui[1].label(&format!("{:.2} ms", statistics.network_delay_average_ms));
+
+            ui[0].label("Decoder delay:");
+            ui[1].label(&format!("{:.2} ms", statistics.decode_delay_average_ms));
+
+            ui[0].label("Decoder queue delay:");
+            ui[1].label(&format!("{:.2} ms", statistics.decoder_queue_delay_average_ms));
+
+            ui[0].label("Client compositor delay:");
+            ui[1].label(&format!("{:.2} ms", statistics.client_compositor_average_ms));
+
+            ui[0].label("Vsync delay:");
+            ui[1].label(&format!("{:.2} ms", statistics.vsync_queue_delay_average_ms));
 
             ui[0].label("Total latency:");
-            ui[1].label(&format!("{:.0} ms", statistics.total_latency_ms));
-
-            ui[0].label("Encoder latency:");
-            ui[1].label(&format!("{:.2} ms", statistics.encode_latency_ms));
-
-            ui[0].label("Transport latency:");
-            ui[1].label(&format!("{:.2} ms", statistics.network_latency_ms));
-
-            ui[0].label("Decoder latency:");
-            ui[1].label(&format!("{:.2} ms", statistics.decode_latency_ms));
-
-            ui[0].label("Total packets lost:");
-            ui[1].label(&format!(
-                "{} packets ({} packets/s)",
-                statistics.packets_lost_total, statistics.packets_lost_per_sec
-            ));
-
-            ui[0].label("Client FPS:");
-            ui[1].label(&format!("{} FPS", statistics.client_fps));
+            ui[1].label(&format!("{:.0} ms", statistics.total_pipeline_latency_average_ms));
 
             ui[0].label("Streamer FPS:");
-            ui[1].label(&format!("{} FPS", statistics.server_fps));
+            ui[1].label(&format!("{} FPS", statistics.frames_sent_per_sec));
+
+            ui[0].label("Client FPS:");
+            ui[1].label(&format!("{} FPS", statistics.frames_received_per_sec));
 
             ui[0].label("Headset battery");
             ui[1].label(&format!(

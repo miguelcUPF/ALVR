@@ -4,20 +4,56 @@ use alvr_session::SessionConfig;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, time::Duration};
 
+
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Statistics {
+    // Frame data
+    pub is_idr: bool,
+    pub frame_index: u32,
+    pub frame_bytes: usize,
+    pub shards_count: usize,
+    pub frame_bytes_sent: usize,
+    // Frame timing metrics
+    pub frame_span: Duration,
+    pub frame_shard_interval_average: Duration,
+    // Interval video statistics
+    pub bytes_sent: usize,
+    pub bytes_received: usize,
+    pub shards_sent: usize,
+    pub shards_received: usize,
+    pub shards_lost: usize,
+    pub shards_duplicated: usize,
+    pub frames_sent: usize,
+    pub frames_received: usize,
+    pub frames_lost: usize,
+    pub frames_discarded: usize,
+    pub frames_dropped: usize
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct StatisticsSummary {
-    pub video_packets_total: usize,
-    pub video_packets_per_sec: usize,
-    pub video_mbytes_total: usize,
-    pub video_mbits_per_sec: f32,
-    pub total_latency_ms: f32,
-    pub network_latency_ms: f32,
-    pub encode_latency_ms: f32,
-    pub decode_latency_ms: f32,
-    pub packets_lost_total: usize,
-    pub packets_lost_per_sec: usize,
-    pub client_fps: u32,
-    pub server_fps: u32,
+    pub total_frames_sent: usize,
+    pub frames_sent_per_sec: f32,
+    pub total_frames_received: usize,
+    pub frames_received_per_sec: f32,
+    pub total_mbits_sent: usize,
+    pub mbits_sent_per_sec: f32,
+    pub total_mbits_received: usize,
+    pub mbits_received_per_sec: f32,
+    pub total_shards_sent: usize,
+    pub shards_sent_per_sec: f32,
+    pub total_shards_received: usize,
+    pub shards_received_per_sec: f32,
+    pub total_pipeline_latency_average_ms: f32,
+    pub game_delay_average_ms: f32,
+    pub server_compositor_delay_average_ms: f32,
+    pub encode_delay_average_ms: f32,
+    pub network_delay_average_ms: f32,
+    pub decode_delay_average_ms: f32,
+    pub decoder_queue_delay_average_ms: f32,
+    pub client_compositor_average_ms: f32,
+    pub vsync_queue_delay_average_ms: f32,
     pub battery_hmd: u32,
     pub hmd_plugged: bool,
 }
@@ -46,10 +82,17 @@ pub struct GraphStatistics {
     pub decoder_queue_s: f32,
     pub client_compositor_s: f32,
     pub vsync_queue_s: f32,
-    pub client_fps: f32,
+    // Frame rate metrics
+    pub server_fps_present: f32,
+    pub server_fps_encode: f32,
     pub server_fps: f32,
+    pub client_fps: f32,
+    pub client_fps_decode: f32,
+    pub client_fps_vsync: f32,
+    // Interval video statistics
+    pub mbits_sent_per_sec: f32,
+    pub mbits_received_per_sec: f32,
     pub nominal_bitrate: NominalBitrateStats,
-    pub actual_bitrate_bps: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -82,6 +125,7 @@ pub enum EventType {
     Log(LogEntry),
     Session(Box<SessionConfig>),
     StatisticsSummary(StatisticsSummary),
+    Statistics(Statistics),
     GraphStatistics(GraphStatistics),
     Tracking(Box<TrackingEvent>),
     Buttons(Vec<ButtonEvent>),

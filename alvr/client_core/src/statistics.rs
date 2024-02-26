@@ -9,15 +9,20 @@ use std::{
 struct HistoryFrame {
     input_acquired: Instant,
     frame_received: Instant,
+    frame_decoded: Instant,
+    frame_composed: Instant,
+    frame_displayed: Instant,
 
     client_stats: ClientStatistics,
 }
 pub struct StatisticsManager {
     history_buffer: VecDeque<HistoryFrame>,
     max_history_size: usize,
-    prev_frame: Instant,
-    prev_decode: Instant,
+
+    prev_reception: Instant,
+    prev_decoding: Instant,
     prev_vsync: Instant,
+
     total_pipeline_latency_average: SlidingWindowAverage<Duration>,
     steamvr_pipeline_latency: Duration,
 }
@@ -31,8 +36,8 @@ impl StatisticsManager {
         Self {
             max_history_size,
             history_buffer: VecDeque::new(),
-            prev_frame: Instant::now(),
-            prev_decode: Instant::now(),
+            prev_reception: Instant::now(),
+            prev_decoding: Instant::now(),
             prev_vsync: Instant::now(),
             total_pipeline_latency_average: SlidingWindowAverage::new(
                 Duration::ZERO,
@@ -53,6 +58,9 @@ impl StatisticsManager {
             self.history_buffer.push_front(HistoryFrame {
                 input_acquired: Instant::now(),
                 frame_received: Instant::now(),
+                frame_decoded: Instant::now(),
+                frame_composed: Instant::now(),
+                frame_displayed: Instant::now(),
                 client_stats: ClientStatistics {
                     target_timestamp,
                     ..Default::default()
@@ -71,11 +79,13 @@ impl StatisticsManager {
             .iter_mut()
             .find(|frame| frame.client_stats.target_timestamp == target_timestamp)
         {
-            frame.frame_received = Instant::now();
+            let now = Instant::now();
+
+            frame.frame_received = now;
 
             frame.client_stats.frame_interval = 
-                Instant::now().saturating_duration_since(self.prev_frame);
-            self.prev_frame = Instant::now();
+                now.saturating_duration_since(self.prev_reception);
+            self.prev_reception = now;
         }
     }
 
@@ -98,7 +108,7 @@ impl StatisticsManager {
             frame.client_stats.frames_dropped = stats.frames_dropped;
 
             frame.client_stats.shards_duplicated = stats.shards_duplicated;
-            
+
             frame.client_stats.highest_frame_index = stats.highest_frame_index;
             frame.client_stats.highest_shard_index = stats.highest_shard_index;
         }
@@ -110,11 +120,15 @@ impl StatisticsManager {
             .iter_mut()
             .find(|frame| frame.client_stats.target_timestamp == target_timestamp)
         {
+            let now = Instant::now();
+
+            frame.frame_decoded = now;
+
             frame.client_stats.video_decode =
-                Instant::now().saturating_duration_since(frame.frame_received);
+                now.saturating_duration_since(frame.frame_received);
             
-            frame.client_stats.frame_interval_decode = Instant::now().saturating_duration_since(self.prev_decode);
-            self.prev_decode = Instant::now();
+            frame.client_stats.frame_interval_decode = now.saturating_duration_since(self.prev_decoding);
+            self.prev_decoding = now;
 
         }
     }
@@ -125,7 +139,11 @@ impl StatisticsManager {
             .iter_mut()
             .find(|frame| frame.client_stats.target_timestamp == target_timestamp)
         {
-            frame.client_stats.video_decoder_queue = Instant::now().saturating_duration_since(
+            let now = Instant::now();
+
+            frame.frame_composed = now;
+
+            frame.client_stats.video_decoder_queue = now.saturating_duration_since(
                 frame.frame_received + frame.client_stats.video_decode,
             );
         }
@@ -153,6 +171,9 @@ impl StatisticsManager {
                 .submit_sample(frame.client_stats.total_pipeline_latency);
 
             let vsync = now + vsync_queue;
+
+            frame.frame_displayed = vsync;
+
             frame.client_stats.frame_interval_vsync = vsync.saturating_duration_since(self.prev_vsync);
             self.prev_vsync = vsync;
         }

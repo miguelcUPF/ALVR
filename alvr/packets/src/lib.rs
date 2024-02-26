@@ -223,7 +223,7 @@ pub struct ClientStatistics {
     pub shards_duplicated: usize,
 
     pub highest_frame_index: u32,
-    pub highest_shard_index: u32,
+    pub highest_shard_index: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
