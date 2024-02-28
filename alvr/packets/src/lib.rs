@@ -202,6 +202,7 @@ pub struct ClientStatistics {
     pub frame_interval_vsync: Duration,
     pub frame_span: Duration,
     pub frame_shard_interval_average: Duration,
+    pub frame_shard_jitter: f32,
 
     //// Latency metrics
     pub video_decode: Duration,

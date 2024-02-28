@@ -505,6 +505,7 @@ impl StatisticsManager {
         let last_instant = shards_instant.values().max().unwrap();
 
         let frame_span = (*last_instant).saturating_duration_since(*first_instant);
+        let client_frame_span = client_stats.frame_span;
 
         let mut frame_shard_interval_sum = Duration::ZERO;
         let mut prev_instant = *first_instant;
@@ -519,6 +520,9 @@ impl StatisticsManager {
         } else {
             Duration::ZERO
         };
+        let client_frame_shard_interval_average = client_stats.frame_shard_interval_average;
+
+        let frame_shard_jitter = client_stats.frame_shard_jitter;
 
         // Interval video statistics
         //// Given that the server and client are not synchronized, we use the last frame
@@ -700,8 +704,12 @@ impl StatisticsManager {
             shards_count,
             frame_bytes_sent, // including prefix
             // Frame timing metrics
-            frame_span,
-            frame_shard_interval_average,
+            frame_span_s: frame_span.as_secs_f32(),
+            client_frame_span_s: client_frame_span.as_secs_f32(),
+            frame_shard_interval_average_s: frame_shard_interval_average.as_secs_f32(),
+            client_frame_shard_interval_average_s: client_frame_shard_interval_average
+                .as_secs_f32(),
+            frame_shard_jitter_s: frame_shard_jitter,
             // Interval video statistics
             bytes_sent,     // including prefix
             bytes_received, // including prefix

@@ -13,8 +13,11 @@ pub struct Statistics {
     pub shards_count: usize,
     pub frame_bytes_sent: usize,
     // Frame timing metrics
-    pub frame_span: Duration,
-    pub frame_shard_interval_average: Duration,
+    pub frame_span_s: f32,
+    pub client_frame_span_s: f32,
+    pub frame_shard_interval_average_s: f32,
+    pub client_frame_shard_interval_average_s: f32,
+    pub frame_shard_jitter_s: f32,
     // Interval video statistics
     pub bytes_sent: usize,
     pub bytes_received: usize,

@@ -200,6 +200,7 @@ pub struct ReceiverData<H> {
     // Packet metrics
     packet_span: Duration,
     packet_shard_interval_average: Duration,
+    packet_shard_jitter: f32,
 
     reception_interval: Duration,
 
@@ -231,6 +232,10 @@ impl<H> ReceiverData<H> {
 
     pub fn get_packet_shard_interval_average(&self) -> Duration {
         self.packet_shard_interval_average
+    }
+
+    pub fn get_packet_shard_jitter(&self) -> f32 {
+        self.packet_shard_jitter
     }
 
     pub fn get_reception_interval(&self) -> Duration {
@@ -295,6 +300,7 @@ struct ReconstructedPacket {
     // Packet metrics
     packet_span: Duration,
     packet_shard_interval_average: Duration,
+    packet_shard_jitter: f32,
 
     reception_interval: Duration,
 
@@ -376,6 +382,7 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
             _phantom: PhantomData,
             packet_span: packet.packet_span,
             packet_shard_interval_average: packet.packet_shard_interval_average,
+            packet_shard_jitter: packet.packet_shard_jitter,
             reception_interval: packet.reception_interval,
             bytes_received: packet.bytes_received,
             shards_received: packet.shards_received,
@@ -814,6 +821,7 @@ impl StreamSocket {
 
             let mut packet_span = Duration::ZERO;
             let mut packet_shard_interval_average = Duration::ZERO;
+            let mut packet_shard_jitter = 0.0;
 
             match self
                 .packets_shards_instant
@@ -824,10 +832,11 @@ impl StreamSocket {
                         .get_mut()
                         .remove(&shard_recv_state_mut.packet_index)
                     {
+                        let mut packet_shard_intervals = Vec::new();
                         let mut packet_shard_interval_sum = Duration::ZERO;
-                        let packet_shards_count = shards_instant.len();
 
-                        if shard_recv_state_mut.shards_count != packet_shards_count {
+                        if shard_recv_state_mut.shards_count != shards_instant.len() {
+                            // remove
                             debug!(
                                 "Shard instants for packet {} in stream {} not properly gathered.",
                                 shard_recv_state_mut.packet_index, shard_recv_state_mut.stream_id
@@ -842,15 +851,31 @@ impl StreamSocket {
 
                             for &instant in shards_instant.iter().skip(1) {
                                 let interval = instant.saturating_duration_since(prev_instant);
+                                packet_shard_intervals.push(interval);
                                 packet_shard_interval_sum += interval;
                                 prev_instant = instant;
                             }
 
-                            packet_shard_interval_average = if packet_shards_count > 1 {
-                                packet_shard_interval_sum / (packet_shards_count - 1) as u32
+                            let packet_shard_interval_count = packet_shard_intervals.len();
+
+                            packet_shard_interval_average = if !packet_shard_intervals.is_empty() {
+                                packet_shard_interval_sum / packet_shard_interval_count as u32
                             } else {
                                 Duration::ZERO
                             };
+
+                            // Compute shard jitter within the packet
+                            let mut jitter_sum = 0.0;
+                            for interval in packet_shard_intervals {
+                                let deviation = (interval.as_secs_f32()
+                                    - packet_shard_interval_average.as_secs_f32())
+                                .abs();
+                                jitter_sum += deviation * deviation;
+                            }
+                            let mean_square_deviation =
+                                jitter_sum / (packet_shard_interval_count as f32);
+                            packet_shard_jitter = mean_square_deviation.sqrt();
+
                             let prev_packet_instant = self
                                 .prev_packet_instant
                                 .entry(shard_recv_state_mut.stream_id)
@@ -877,6 +902,7 @@ impl StreamSocket {
                     size,
                     packet_span,
                     packet_shard_interval_average,
+                    packet_shard_jitter,
                     reception_interval,
                     bytes_received: *bytes_received,
                     shards_received: *shards_received,

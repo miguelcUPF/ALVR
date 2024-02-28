@@ -96,6 +96,7 @@ impl StatisticsManager {
         {
             frame.client_stats.frame_span = stats.frame_span;
             frame.client_stats.frame_shard_interval_average = stats.frame_shard_interval_average;
+            frame.client_stats.frame_shard_jitter = stats.frame_shard_jitter;
 
             frame.client_stats.reception_interval = stats.reception_interval;
 
