@@ -83,8 +83,7 @@ impl StatisticsManager {
 
             frame.frame_received = now;
 
-            frame.client_stats.frame_interval = 
-                now.saturating_duration_since(self.prev_reception);
+            frame.client_stats.frame_interval = now.saturating_duration_since(self.prev_reception);
             self.prev_reception = now;
         }
     }
@@ -99,7 +98,7 @@ impl StatisticsManager {
             frame.client_stats.frame_shard_interval_average = stats.frame_shard_interval_average;
 
             frame.client_stats.reception_interval = stats.reception_interval;
-            
+
             frame.client_stats.bytes_received = stats.bytes_received;
             frame.client_stats.shards_received = stats.shards_received;
 
@@ -124,12 +123,11 @@ impl StatisticsManager {
 
             frame.frame_decoded = now;
 
-            frame.client_stats.video_decode =
-                now.saturating_duration_since(frame.frame_received);
-            
-            frame.client_stats.frame_interval_decode = now.saturating_duration_since(self.prev_decoding);
-            self.prev_decoding = now;
+            frame.client_stats.video_decode = now.saturating_duration_since(frame.frame_received);
 
+            frame.client_stats.frame_interval_decode =
+                now.saturating_duration_since(self.prev_decoding);
+            self.prev_decoding = now;
         }
     }
 
@@ -143,9 +141,8 @@ impl StatisticsManager {
 
             frame.frame_composed = now;
 
-            frame.client_stats.video_decoder_queue = now.saturating_duration_since(
-                frame.frame_received + frame.client_stats.video_decode,
-            );
+            frame.client_stats.video_decoder_queue = now
+                .saturating_duration_since(frame.frame_received + frame.client_stats.video_decode);
         }
     }
 
@@ -174,7 +171,8 @@ impl StatisticsManager {
 
             frame.frame_displayed = vsync;
 
-            frame.client_stats.frame_interval_vsync = vsync.saturating_duration_since(self.prev_vsync);
+            frame.client_stats.frame_interval_vsync =
+                vsync.saturating_duration_since(self.prev_vsync);
             self.prev_vsync = vsync;
         }
     }

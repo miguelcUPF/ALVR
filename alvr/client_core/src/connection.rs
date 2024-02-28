@@ -81,10 +81,10 @@ pub static STATISTICS_SENDER: OptLazy<StreamSender<ClientStatistics>> =
     alvr_common::lazy_mut_none();
 
 #[derive(Copy, Clone)]
-pub struct VideoStatistics{
+pub struct VideoStatistics {
     pub frame_span: Duration,
     pub frame_shard_interval_average: Duration,
-    
+
     pub reception_interval: Duration,
 
     pub bytes_received: usize,
@@ -92,7 +92,7 @@ pub struct VideoStatistics{
 
     pub frames_lost_discarded: usize,
     pub frames_discarded: usize,
-    pub frames_dropped: usize, 
+    pub frames_dropped: usize,
 
     pub shards_duplicated: usize,
 
@@ -346,8 +346,11 @@ fn connection_pipeline(
                 stream_corrupted = false;
             } else if data.get_packets_lost_discarded() != 0 {
                 stream_corrupted = true;
-            
-                warn!("Network lost or delayed video packet/s: {}", data.get_packets_lost_discarded());
+
+                warn!(
+                    "Network lost or delayed video packet/s: {}",
+                    data.get_packets_lost_discarded()
+                );
             }
 
             reception_interval += data.get_reception_interval();
@@ -365,8 +368,8 @@ fn connection_pipeline(
                     }
                     packets_dropped += 1;
                     warn!("Dropped video packet. Reason: Decoder saturation")
-                } else{
-                    let video_stats = VideoStatistics{
+                } else {
+                    let video_stats = VideoStatistics {
                         frame_span: data.get_packet_span(),
                         frame_shard_interval_average: data.get_packet_shard_interval_average(),
 
@@ -377,14 +380,14 @@ fn connection_pipeline(
 
                         frames_lost_discarded: packets_lost_discarded,
                         frames_discarded: packets_discarded,
-                        frames_dropped: packets_dropped, 
+                        frames_dropped: packets_dropped,
 
                         shards_duplicated: shards_duplicated,
 
                         highest_frame_index: data.get_highest_packet_index(),
                         highest_shard_index: data.get_highest_shard_index(),
-                    }; 
-        
+                    };
+
                     if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
                         stats.report_video_statistics(header.timestamp, video_stats);
                     }

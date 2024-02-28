@@ -1,5 +1,5 @@
 use crate::{dashboard::theme::graph_colors, dashboard::ServerRequest};
-use alvr_events::{GraphStatistics, StatisticsSummary};
+use alvr_events::{GraphStatistics, ServerStatistics, StatisticsSummary};
 use alvr_gui_common::theme;
 use eframe::{
     egui::{
@@ -339,16 +339,10 @@ impl StatisticsTab {
 
         ui.columns(2, |ui| {
             ui[0].label("Total frames sent:");
-            ui[1].label(&format!(
-                "{} frames",
-                statistics.total_frames_sent
-            ));
+            ui[1].label(&format!("{} frames", statistics.total_frames_sent));
 
             ui[0].label("Total frames received:");
-            ui[1].label(&format!(
-                "{} frames",
-                statistics.total_frames_received
-            ));
+            ui[1].label(&format!("{} frames", statistics.total_frames_received));
 
             ui[0].label("Total shards sent:");
             ui[1].label(&format!(
@@ -378,7 +372,10 @@ impl StatisticsTab {
             ui[1].label(&format!("{:.2} ms", statistics.game_delay_average_ms));
 
             ui[0].label("Server compositor delay:");
-            ui[1].label(&format!("{:.2} ms", statistics.server_compositor_delay_average_ms));
+            ui[1].label(&format!(
+                "{:.2} ms",
+                statistics.server_compositor_delay_average_ms
+            ));
 
             ui[0].label("Encoder delay:");
             ui[1].label(&format!("{:.2} ms", statistics.encode_delay_average_ms));
@@ -390,16 +387,28 @@ impl StatisticsTab {
             ui[1].label(&format!("{:.2} ms", statistics.decode_delay_average_ms));
 
             ui[0].label("Decoder queue delay:");
-            ui[1].label(&format!("{:.2} ms", statistics.decoder_queue_delay_average_ms));
+            ui[1].label(&format!(
+                "{:.2} ms",
+                statistics.decoder_queue_delay_average_ms
+            ));
 
             ui[0].label("Client compositor delay:");
-            ui[1].label(&format!("{:.2} ms", statistics.client_compositor_average_ms));
+            ui[1].label(&format!(
+                "{:.2} ms",
+                statistics.client_compositor_average_ms
+            ));
 
             ui[0].label("Vsync delay:");
-            ui[1].label(&format!("{:.2} ms", statistics.vsync_queue_delay_average_ms));
+            ui[1].label(&format!(
+                "{:.2} ms",
+                statistics.vsync_queue_delay_average_ms
+            ));
 
             ui[0].label("Total latency:");
-            ui[1].label(&format!("{:.0} ms", statistics.total_pipeline_latency_average_ms));
+            ui[1].label(&format!(
+                "{:.0} ms",
+                statistics.total_pipeline_latency_average_ms
+            ));
 
             ui[0].label("Streamer FPS:");
             ui[1].label(&format!("{} FPS", statistics.frames_sent_per_sec));

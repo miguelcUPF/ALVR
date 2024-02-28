@@ -4,8 +4,6 @@ use alvr_session::SessionConfig;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, time::Duration};
 
-
-
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Statistics {
     // Frame data
@@ -28,7 +26,7 @@ pub struct Statistics {
     pub frames_received: usize,
     pub frames_lost: usize,
     pub frames_discarded: usize,
-    pub frames_dropped: usize
+    pub frames_dropped: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]

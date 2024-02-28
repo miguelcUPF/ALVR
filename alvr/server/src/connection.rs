@@ -608,7 +608,12 @@ fn connection_pipeline(
                 let shards_instant = video_sender.get_shards_instant();
 
                 if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
-                    stats.report_frame_transmitted(header.timestamp, packet_index, shards_bytes, shards_instant);
+                    stats.report_frame_transmitted(
+                        header.timestamp,
+                        packet_index,
+                        shards_bytes,
+                        shards_instant,
+                    );
                 }
             }
         }
