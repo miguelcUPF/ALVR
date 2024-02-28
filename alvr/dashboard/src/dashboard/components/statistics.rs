@@ -1,5 +1,5 @@
 use crate::{dashboard::theme::graph_colors, dashboard::ServerRequest};
-use alvr_events::{GraphStatistics, Statistics, StatisticsSummary};
+use alvr_events::{GraphStatistics, StatisticsSummary};
 use alvr_gui_common::theme;
 use eframe::{
     egui::{

@@ -281,7 +281,7 @@ impl StatisticsManager {
             .iter_mut()
             .find(|frame| frame.server_stats.target_timestamp == target_timestamp)
         {
-            let last_instant = *shards_instant.values().last().unwrap();
+            let last_instant = *shards_instant.values().last().unwrap_or(&Instant::now());
 
             frame.frame_transmitted = last_instant;
 
@@ -501,14 +501,14 @@ impl StatisticsManager {
 
         //// Frame timing metrics
         let shards_instant = frame.server_stats.shards_instant;
-        let first_instant = shards_instant.values().min().unwrap();
-        let last_instant = shards_instant.values().max().unwrap();
+        let first_instant = *shards_instant.values().min().unwrap_or(&Instant::now());
+        let last_instant = *shards_instant.values().max().unwrap_or(&Instant::now());
 
-        let frame_span = (*last_instant).saturating_duration_since(*first_instant);
+        let frame_span = last_instant.saturating_duration_since(first_instant);
         let client_frame_span = client_stats.frame_span;
 
         let mut frame_shard_interval_sum = Duration::ZERO;
-        let mut prev_instant = *first_instant;
+        let mut prev_instant = first_instant;
         for &instant in shards_instant.values().skip(1) {
             let interval = instant.saturating_duration_since(prev_instant);
             frame_shard_interval_sum += interval;
@@ -532,26 +532,22 @@ impl StatisticsManager {
 
         let highest_idx = highest_frame_received.server_stats.frame_index;
 
-        let frames_sent;
+        let mut frames_sent = highest_idx.wrapping_sub(prev_idx);
 
         if self.is_first_stats {
-            let lowest_frame_temp = self
+            if let Some(lowest_frame) = self
                 .history_buffer
                 .iter_mut()
-                .min_by_key(|frame_| frame_.server_stats.frame_index);
-            self.prev_last_shard_received_instant = *lowest_frame_temp
-                .unwrap()
-                .server_stats
-                .shards_instant
-                .values()
-                .min()
-                .unwrap();
-
-            frames_sent = highest_idx.wrapping_sub(prev_idx) + 1;
-
-            self.is_first_stats = false;
-        } else {
-            frames_sent = highest_idx.wrapping_sub(prev_idx);
+                .min_by_key(|frame_| frame_.server_stats.frame_index)
+            {
+                if let Some(lowest_shard_instant) =
+                    lowest_frame.server_stats.shards_instant.values().min()
+                {
+                    frames_sent += 1;
+                    self.is_first_stats = false;
+                    self.prev_last_shard_received_instant = *lowest_shard_instant;
+                }
+            }
         }
 
         let frames_discarded = client_stats.frames_discarded;
