@@ -18,22 +18,23 @@
 
 use crate::backend::{tcp, udp, SocketReader, SocketWriter};
 use alvr_common::{
-    anyhow::Result, debug, parking_lot::Mutex, AnyhowToCon, ConResult, HandleTryAgain, ToCon,
+    anyhow::Result, parking_lot::Mutex, warn, AnyhowToCon, ConResult, HandleTryAgain, ToCon,
 };
+use alvr_packets::VIDEO;
 use alvr_session::{DscpTos, SocketBufferSize, SocketProtocol};
 use indexmap::IndexMap;
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
     cmp::Ordering,
-    collections::{hash_map::Entry, HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     marker::PhantomData,
     mem,
     net::{IpAddr, TcpListener, UdpSocket},
     sync::{mpsc, Arc},
-    time::{Duration, Instant},
+    time::{Instant,Duration},
 };
 
-const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // packet length - field itself (4 bytes)
+const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // shard length - field itself (4 bytes)
     + mem::size_of::<u16>() // stream ID
     + mem::size_of::<u32>() // packet index
     + mem::size_of::<u32>() // shards count
@@ -88,74 +89,79 @@ impl<H> Buffer<H> {
 #[derive(Clone)]
 pub struct StreamSender<H> {
     inner: Arc<Mutex<Box<dyn SocketWriter>>>,
+
     stream_id: u16,
-    max_packet_size: usize,
-    prev_packet_index: u32,
-    shards_bytes: IndexMap<u16, usize>, // including prefix
-    shards_instant: IndexMap<u16, Instant>,
+    max_shard_size: usize,
+    next_packet_index: u32,
+
     used_buffers: Vec<Vec<u8>>,
     _phantom: PhantomData<H>,
+
+    // Video stream metrics
+    shards_bytes: Option<IndexMap<u16, usize>>, // including prefix
+    shards_instant: Option<IndexMap<u16, Instant>>,
 }
 
 impl<H> StreamSender<H> {
-    pub fn get_prev_packet_index(&self) -> u32 {
-        self.prev_packet_index
+    pub fn get_next_packet_index(&self) -> u32 {
+        self.next_packet_index
     }
 
-    pub fn get_shards_bytes(&self) -> IndexMap<u16, usize> {
+    pub fn get_shards_bytes(&self) -> Option<IndexMap<u16, usize>> {
         self.shards_bytes.clone()
     }
 
-    pub fn get_shards_instant(&self) -> IndexMap<u16, Instant> {
+    pub fn get_shards_instant(&self) -> Option<IndexMap<u16, Instant>> {
         self.shards_instant.clone()
     }
-}
 
-impl<H> StreamSender<H> {
     /// Shard and send a buffer with zero copies and zero allocations.
     /// The prefix of each shard is written over the previously sent shard to avoid reallocations.
     pub fn send(&mut self, mut buffer: Buffer<H>) -> Result<()> {
-        self.shards_bytes.clear();
-        self.shards_instant.clear();
-
-        let max_shard_data_size = self.max_packet_size - SHARD_PREFIX_SIZE;
+        if let (Some(shards_bytes), Some(shards_instant)) =
+            (&mut self.shards_bytes, &mut self.shards_instant)
+        {
+            shards_bytes.clear();
+            shards_instant.clear();
+        }
+        let max_shard_data_size = self.max_shard_size - SHARD_PREFIX_SIZE;
         let actual_buffer_size = buffer.hidden_offset + buffer.length;
         let data_size = actual_buffer_size - SHARD_PREFIX_SIZE;
         let shards_count = (data_size as f32 / max_shard_data_size as f32).ceil() as usize;
 
-        let mut packet_index = self.prev_packet_index + 1;
-        if packet_index == u32::MAX {
-            // If the next index is the maximum value, wrap around to 0
-            packet_index = 0;
-        }
-
         for idx in 0..shards_count {
             // this overlaps with the previous shard, this is intended behavior and allows to
             // reduce allocations
-            let packet_start_position = idx * max_shard_data_size;
-            let sub_buffer = &mut buffer.inner[packet_start_position..];
+            let shard_start_position = idx * max_shard_data_size;
+            let sub_buffer = &mut buffer.inner[shard_start_position..];
 
             // NB: true shard length (account for last shard that is smaller)
             let shard_length = usize::min(
-                self.max_packet_size,
-                actual_buffer_size - packet_start_position,
+                self.max_shard_size,
+                actual_buffer_size - shard_start_position,
             );
 
             // todo: switch to little endian
-            // todo: do not remove sizeof<u32> for sahrd length
+            // todo: do not remove sizeof<u32> for packet length
             sub_buffer[0..4]
                 .copy_from_slice(&((shard_length - mem::size_of::<u32>()) as u32).to_be_bytes());
             sub_buffer[4..6].copy_from_slice(&self.stream_id.to_be_bytes());
-            sub_buffer[6..10].copy_from_slice(&packet_index.to_be_bytes());
+            sub_buffer[6..10].copy_from_slice(&self.next_packet_index.to_be_bytes());
             sub_buffer[10..14].copy_from_slice(&(shards_count as u32).to_be_bytes());
             sub_buffer[14..18].copy_from_slice(&(idx as u32).to_be_bytes());
 
             self.inner.lock().send(&sub_buffer[..shard_length])?;
-            self.shards_bytes.insert(idx as u16, shard_length);
-            self.shards_instant.insert(idx as u16, Instant::now());
+
+            if let (Some(shards_bytes), Some(shards_instant)) =
+                (&mut self.shards_bytes, &mut self.shards_instant)
+            {
+                let now = Instant::now();
+                shards_bytes.insert(idx as u16, shard_length);
+                shards_instant.insert(idx as u16, now);
+            }
         }
 
-        self.prev_packet_index = packet_index;
+        self.next_packet_index = self.next_packet_index.wrapping_add(1);
 
         self.used_buffers.push(buffer.inner);
 
@@ -197,77 +203,84 @@ pub struct ReceiverData<H> {
     used_buffer_queue: mpsc::Sender<Vec<u8>>,
     _phantom: PhantomData<H>,
 
-    // Packet metrics
-    packet_span: Duration,
-    packet_shard_interval_average: Duration,
-    packet_shard_jitter: f32,
+    index: u32,
+    had_packet_skip: bool,
 
-    reception_interval: Duration,
+    // Video stream metrics
+    reception_interval: Option<Duration>,
+    highest_packet_index: Option<u32>,
+    highest_shard_index: Option<usize>,
 
-    bytes_received: usize,
-    shards_received: usize,
+    //// Interval metrics
+    bytes_received: Option<usize>,
+    shards_received: Option<usize>,
+    shards_dropped: Option<usize>,
+    shards_duplicated: Option<usize>,
+    packets_skipped: Option<usize>,
+    packets_discarded: Option<usize>,
 
-    had_packet_loss: bool,
-    packets_lost_discarded: usize,
-    packets_discarded: usize,
-
-    shards_duplicated: usize,
-
-    highest_packet_index: u32,
-    highest_shard_index: usize,
+    //// Packet metrics
+    packet_span: Option<Duration>,
+    shards_interval_average: Option<f32>,
+    shards_jitter: Option<f32>,
 }
 
 impl<H> ReceiverData<H> {
-    pub fn had_packet_loss(&self) -> bool {
-        self.had_packet_loss
+    pub fn had_packet_skip(&self) -> bool {
+        self.had_packet_skip
     }
 
-    pub fn get_size(&self) -> usize {
-        self.size
+    
+    pub fn get_index(&self) -> u32 {
+        self.index
     }
 
-    pub fn get_packet_span(&self) -> Duration {
-        self.packet_span
-    }
-
-    pub fn get_packet_shard_interval_average(&self) -> Duration {
-        self.packet_shard_interval_average
-    }
-
-    pub fn get_packet_shard_jitter(&self) -> f32 {
-        self.packet_shard_jitter
-    }
-
-    pub fn get_reception_interval(&self) -> Duration {
-        self.reception_interval
-    }
-
-    pub fn get_bytes_received(&self) -> usize {
-        self.bytes_received
-    }
-
-    pub fn get_shards_received(&self) -> usize {
-        self.shards_received
-    }
-
-    pub fn get_packets_lost_discarded(&self) -> usize {
-        self.packets_lost_discarded
-    }
-
-    pub fn get_packets_discarded(&self) -> usize {
-        self.packets_discarded
-    }
-
-    pub fn get_shards_duplicated(&self) -> usize {
-        self.shards_duplicated
-    }
-
-    pub fn get_highest_packet_index(&self) -> u32 {
+    pub fn get_highest_packet_index(&self) -> Option<u32> {
         self.highest_packet_index
     }
 
-    pub fn get_highest_shard_index(&self) -> usize {
+    pub fn get_highest_shard_index(&self) -> Option<usize> {
         self.highest_shard_index
+    }
+
+    pub fn get_reception_interval(&self) -> Option<Duration> {
+        self.reception_interval
+    }
+
+    pub fn get_bytes_received(&self) -> Option<usize> {
+        self.bytes_received
+    }
+
+    pub fn get_shards_received(&self) -> Option<usize> {
+        self.shards_received
+    }
+
+    pub fn get_shards_dropped(&self) -> Option<usize> {
+        self.shards_dropped
+    }
+
+    pub fn get_shards_duplicated(&self) -> Option<usize> {
+        self.shards_duplicated
+    }
+
+    pub fn get_packets_skipped(&self) -> Option<usize> {
+        self.packets_skipped
+    }
+
+    pub fn get_packets_discarded(&self) -> Option<usize> {
+        self.packets_discarded
+    }
+
+    pub fn get_packet_span(&self) -> Option<Duration> {
+        self.packet_span
+    }
+
+    pub fn get_shards_interval_average(&self) -> Option<f32> {
+        self.shards_interval_average
+    }
+
+    pub fn get_shards_jitter(&self) -> Option<f32> {
+        self.shards_jitter
     }
 }
 
@@ -297,30 +310,34 @@ struct ReconstructedPacket {
     buffer: Vec<u8>,
     size: usize, // including the prefix
 
-    // Packet metrics
-    packet_span: Duration,
-    packet_shard_interval_average: Duration,
-    packet_shard_jitter: f32,
-
-    reception_interval: Duration,
-
-    bytes_received: usize,
-    shards_received: usize,
-
-    shards_duplicated: usize,
-
-    highest_packet_index: u32,
-    highest_shard_index: usize,
+    // Video stream metrics
+    highest_packet_index: Option<u32>,
+    highest_shard_index: Option<usize>,
+    video_packet_metrics: Option<VideoPacketMetrics>,
 }
 
 pub struct StreamReceiver<H> {
+    stream_id: u16,
     packet_receiver: mpsc::Receiver<ReconstructedPacket>,
     used_buffer_queue: mpsc::Sender<Vec<u8>>,
-    prev_packet_index: u32,
+    next_packet_index: u32,
     _phantom: PhantomData<H>,
 
-    packets_lost_discarded: usize, // non-cumulative
-    packets_discarded: usize,      // non-cumulative
+    // Video stream metrics
+    reception_interval: Option<Duration>,
+
+    //// Interval metrics
+    bytes_received: Option<usize>,
+    shards_received: Option<usize>,
+    shards_dropped: Option<usize>,
+    shards_duplicated: Option<usize>,
+    packets_skipped: Option<usize>,
+    packets_discarded: Option<usize>,
+
+    //// Packet metrics
+    packet_span: Option<Duration>,
+    shards_interval_average: Option<f32>,
+    shards_jitter: Option<f32>,
 }
 
 fn wrapping_cmp(lhs: u32, rhs: u32) -> Ordering {
@@ -344,55 +361,94 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
             .recv_timeout(timeout)
             .handle_try_again()?;
 
-        let mut had_packet_loss = false;
-
-        let mut packet_index = self.prev_packet_index + 1;
-        if packet_index == u32::MAX {
-            // If the next index is the maximum value, wrap around to 0
-            packet_index = 0;
+        if let Some(video_packet_metrics) = packet.video_packet_metrics {
+            self.reception_interval = self
+                .reception_interval
+                .map(|x| x + video_packet_metrics.reception_interval);
+            self.bytes_received = self
+                .bytes_received
+                .map(|x| x + video_packet_metrics.bytes_received);
+            self.shards_received = self
+                .shards_received
+                .map(|x| x + video_packet_metrics.shards_received);
+            self.shards_dropped = self
+                .shards_dropped
+                .map(|x| x + video_packet_metrics.shards_dropped);
+            self.shards_duplicated = self
+                .shards_duplicated
+                .map(|x| x + video_packet_metrics.shards_duplicated);
+            self.packet_span = Some(video_packet_metrics.packet_span);
+            self.shards_interval_average = Some(video_packet_metrics.shards_interval_average);
+            self.shards_jitter = Some(video_packet_metrics.shards_jitter);
         }
 
+        let mut had_packet_skip = false;
+
         // Use wrapping arithmetics
-        match wrapping_cmp(packet.index, packet_index) {
+        match wrapping_cmp(packet.index, self.next_packet_index) {
             Ordering::Equal => (),
             Ordering::Greater => {
                 // Skipped some indices
-                had_packet_loss = true;
-                self.packets_lost_discarded += packet.index.wrapping_sub(packet_index) as usize;
+                had_packet_skip = true;
+                self.packets_skipped = self
+                    .packets_skipped
+                    .map(|x| x + packet.index.wrapping_sub(self.next_packet_index) as usize);
+
+                warn!("Skipped packets from stream {}!", self.stream_id);
             }
             Ordering::Less => {
                 // Old packet, discard
-                self.packets_discarded += 1;
+                self.packets_discarded = self.packets_discarded.map(|x| x + 1);
+                warn!("Discarded a packet from stream {}!", self.stream_id);
                 self.used_buffer_queue.send(packet.buffer).to_con()?;
                 return alvr_common::try_again();
             }
         }
-
-        let lost_discarded = self.packets_lost_discarded;
-        let discarded = self.packets_discarded;
-
-        self.prev_packet_index = packet.index;
-        self.packets_lost_discarded = 0;
-        self.packets_discarded = 0;
+        
+        self.next_packet_index = packet.index.wrapping_add(1);
 
         Ok(ReceiverData {
             buffer: Some(packet.buffer),
             size: packet.size,
             used_buffer_queue: self.used_buffer_queue.clone(),
             _phantom: PhantomData,
-            packet_span: packet.packet_span,
-            packet_shard_interval_average: packet.packet_shard_interval_average,
-            packet_shard_jitter: packet.packet_shard_jitter,
-            reception_interval: packet.reception_interval,
-            bytes_received: packet.bytes_received,
-            shards_received: packet.shards_received,
-            had_packet_loss,
-            packets_lost_discarded: lost_discarded,
-            packets_discarded: discarded,
-            shards_duplicated: packet.shards_duplicated,
+
+            had_packet_skip,
+            index: packet.index,
+
+            // Video stream metrics
             highest_packet_index: packet.highest_packet_index,
             highest_shard_index: packet.highest_shard_index,
+            reception_interval: self.reception_interval,
+
+            //// Interval metrics
+            bytes_received: self.bytes_received,
+            shards_received: self.shards_received,
+            shards_dropped: self.shards_dropped,
+            shards_duplicated: self.shards_duplicated,
+            packets_skipped: self.packets_skipped,
+            packets_discarded: self.packets_discarded,
+
+            //// Packet metrics
+            packet_span: self.packet_span,
+            shards_interval_average: self.shards_interval_average,
+            shards_jitter: self.shards_jitter,
         })
+    }
+
+    pub fn clear_video_stream_metrics(&mut self) {
+        self.reception_interval = Some(Duration::ZERO);
+
+        self.bytes_received = Some(0);
+        self.shards_received = Some(0);
+        self.shards_dropped = Some(0);
+        self.shards_duplicated = Some(0);
+        self.packets_skipped = Some(0);
+        self.packets_discarded = Some(0);
+
+        self.packet_span = Some(Duration::ZERO);
+        self.shards_interval_average = Some(0.0);
+        self.shards_jitter = Some(0.0);
     }
 }
 
@@ -431,7 +487,7 @@ impl StreamSocketBuilder {
         self,
         server_ip: IpAddr,
         port: u16,
-        max_packet_size: usize,
+        max_shard_size: usize,
         timeout: Duration,
     ) -> ConResult<StreamSocket> {
         let (send_socket, receive_socket): (Box<dyn SocketWriter>, Box<dyn SocketReader>) =
@@ -453,19 +509,13 @@ impl StreamSocketBuilder {
         Ok(StreamSocket {
             // +4 is a workaround to retain compatibilty with old protocol
             // todo: remove +4
-            max_packet_size: max_packet_size + 4,
+            max_shard_size: max_shard_size + 4,
             send_socket: Arc::new(Mutex::new(send_socket)),
             receive_socket,
             shard_recv_state: None,
             stream_recv_components: HashMap::new(),
 
-            packets_shards_instant: HashMap::new(),
-            prev_packet_instant: HashMap::new(),
-            bytes_received: HashMap::new(),
-            shards_received: HashMap::new(),
-            shards_duplicated: HashMap::new(),
-            highest_packet_index: HashMap::new(),
-            highest_shard_index: HashMap::new(),
+            video_stream_stats: VideoStreamStats::default(),
         })
     }
 
@@ -478,7 +528,7 @@ impl StreamSocketBuilder {
         dscp: Option<DscpTos>,
         send_buffer_bytes: SocketBufferSize,
         recv_buffer_bytes: SocketBufferSize,
-        max_packet_size: usize,
+        max_shard_size: usize,
     ) -> ConResult<StreamSocket> {
         let (send_socket, receive_socket): (Box<dyn SocketWriter>, Box<dyn SocketReader>) =
             match protocol {
@@ -506,30 +556,24 @@ impl StreamSocketBuilder {
         Ok(StreamSocket {
             // +4 is a workaround to retain compatibilty with old protocol
             // todo: remove +4
-            max_packet_size: max_packet_size + 4,
+            max_shard_size: max_shard_size + 4,
             send_socket: Arc::new(Mutex::new(send_socket)),
             receive_socket,
             shard_recv_state: None,
             stream_recv_components: HashMap::new(),
 
-            packets_shards_instant: HashMap::new(),
-            prev_packet_instant: HashMap::new(),
-            bytes_received: HashMap::new(),
-            shards_received: HashMap::new(),
-            shards_duplicated: HashMap::new(),
-            highest_packet_index: HashMap::new(),
-            highest_shard_index: HashMap::new(),
+            video_stream_stats: VideoStreamStats::default(),
         })
     }
 }
 
 struct RecvState {
-    shard_length: usize, // contains prefix length itself
+    shard_length: usize, // including prefix
     stream_id: u16,
     packet_index: u32,
     shards_count: usize,
     shard_index: usize,
-    packet_cursor: usize, // counts also the prefix bytes
+    bytes_cursor: usize, // counts also the prefix bytes
     overwritten_data_backup: Option<[u8; SHARD_PREFIX_SIZE]>,
     should_discard: bool,
 }
@@ -548,36 +592,97 @@ struct StreamRecvComponents {
     discarded_shards_sink: InProgressPacket,
 }
 
+
+#[derive(Clone, Copy)]
+pub struct VideoPacketMetrics {
+    reception_interval: Duration,
+
+    // Interval metrics
+    bytes_received: usize,    // non-cumulative
+    shards_received: usize,   // non-cumulative
+    shards_dropped: usize,    // non-cumulative
+    shards_duplicated: usize, // non-cumulative
+
+    // Packet metrics
+    packet_span: Duration,
+    shards_interval_average: f32,
+    shards_jitter: f32,
+}
+
+impl Default for VideoPacketMetrics {
+    fn default() -> Self {
+        VideoPacketMetrics {
+            reception_interval: Duration::ZERO,
+
+            // Interval metrics
+            bytes_received: 0,
+            shards_received: 0,
+            shards_dropped: 0,
+            shards_duplicated: 0,
+
+            // Packet metrics
+            packet_span: Duration::ZERO,
+            shards_interval_average: 0.0,
+            shards_jitter: 0.0,
+        }
+    }
+}
+
+pub struct VideoStreamStats {
+    packet_shards_instant: HashMap<u32, VecDeque<Instant>>,
+    highest_packet_index: u32,
+    highest_shard_index: usize,
+
+    prev_packet_instant: Instant,
+
+    last_packet_metrics: VideoPacketMetrics,
+}
+
+impl Default for VideoStreamStats {
+    fn default() -> Self {
+        VideoStreamStats {
+            packet_shards_instant: HashMap::new(),
+            highest_packet_index: 0,
+            highest_shard_index: 0,
+
+            prev_packet_instant: Instant::now(),
+
+            last_packet_metrics: VideoPacketMetrics::default(),
+        }
+    }
+}
+
 // Note: used buffers don't *have* to be split by stream ID, but doing so improves memory usage
 // todo: impose cap on number of created buffers to avoid OOM crashes
 pub struct StreamSocket {
-    max_packet_size: usize,
+    max_shard_size: usize,
     send_socket: Arc<Mutex<Box<dyn SocketWriter>>>,
     receive_socket: Box<dyn SocketReader>,
     shard_recv_state: Option<RecvState>,
     stream_recv_components: HashMap<u16, StreamRecvComponents>,
 
-    // Streams metrics
-    packets_shards_instant: HashMap<u16, HashMap<u32, VecDeque<Instant>>>,
-    prev_packet_instant: HashMap<u16, Instant>,
-    bytes_received: HashMap<u16, usize>,    // non-cumulative
-    shards_received: HashMap<u16, usize>,   // non-cumulative
-    shards_duplicated: HashMap<u16, usize>, // non-cumulative
-    highest_packet_index: HashMap<u16, u32>,
-    highest_shard_index: HashMap<u16, usize>,
+    video_stream_stats: VideoStreamStats,
 }
 
 impl StreamSocket {
     pub fn request_stream<T>(&self, stream_id: u16) -> StreamSender<T> {
+        let (shards_bytes, shards_instant) = if stream_id == VIDEO {
+            (Some(IndexMap::new()), Some(IndexMap::new()))
+        } else {
+            (None, None)
+        };
         StreamSender {
             inner: Arc::clone(&self.send_socket),
+
             stream_id,
-            max_packet_size: self.max_packet_size,
-            prev_packet_index: 0,
-            shards_bytes: IndexMap::new(),
-            shards_instant: IndexMap::new(),
+            max_shard_size: self.max_shard_size,
+            next_packet_index: 0,
+
             used_buffers: vec![],
             _phantom: PhantomData,
+
+            shards_bytes,
+            shards_instant,
         }
     }
 
@@ -611,13 +716,53 @@ impl StreamSocket {
             },
         );
 
+        let (
+            reception_interval,
+            bytes_received,
+            shards_received,
+            shards_dropped,
+            shards_duplicated,
+            packets_skipped,
+            packets_discarded,
+            packet_span,
+            shards_interval_average,
+            shards_jitter,
+        ) = if stream_id == VIDEO {
+            (
+                Some(Duration::ZERO),
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(Duration::ZERO),
+                Some(0.0),
+                Some(0.0),
+            )
+        } else {
+            (None, None, None, None, None, None, None, None, None, None)
+        };
+
         StreamReceiver {
+            stream_id,
             packet_receiver,
             used_buffer_queue: used_buffer_sender,
             _phantom: PhantomData,
-            prev_packet_index: 0,
-            packets_lost_discarded: 0,
-            packets_discarded: 0,
+            next_packet_index: 0,
+
+            reception_interval,
+
+            bytes_received,
+            shards_received,
+            shards_dropped,
+            shards_duplicated,
+            packets_skipped,
+            packets_discarded,
+
+            packet_span,
+            shards_interval_average,
+            shards_jitter,
         }
     }
 
@@ -635,7 +780,7 @@ impl StreamSocket {
 
             // todo: switch to little endian
             // todo: do not remove sizeof<u32> for packet length
-            let shard_length: usize = mem::size_of::<u32>()
+            let shard_length = mem::size_of::<u32>()
                 + u32::from_be_bytes(bytes[0..4].try_into().unwrap()) as usize;
             let stream_id = u16::from_be_bytes(bytes[4..6].try_into().unwrap());
             let packet_index = u32::from_be_bytes(bytes[6..10].try_into().unwrap());
@@ -648,19 +793,43 @@ impl StreamSocket {
                 packet_index,
                 shards_count,
                 shard_index,
-                packet_cursor: 0,
+                bytes_cursor: 0,
                 overwritten_data_backup: None,
                 should_discard: false,
             })
         };
 
+        // TODO: does it take the same twice?
+
+        if shard_recv_state_mut.stream_id == VIDEO {
+            self.video_stream_stats.last_packet_metrics.bytes_received +=
+                shard_recv_state_mut.shard_length;
+
+            self.video_stream_stats.last_packet_metrics.shards_received += 1;
+
+            if self.video_stream_stats.highest_packet_index == shard_recv_state_mut.packet_index {
+                if self.video_stream_stats.highest_shard_index < shard_recv_state_mut.shard_index {
+                    self.video_stream_stats.highest_shard_index = shard_recv_state_mut.shard_index;
+                }
+            } else if self.video_stream_stats.highest_packet_index
+                < shard_recv_state_mut.packet_index
+            {
+                self.video_stream_stats.highest_packet_index = shard_recv_state_mut.packet_index;
+                self.video_stream_stats.highest_shard_index = shard_recv_state_mut.shard_index;
+            }
+        }
+
+
         let Some(components) = self
             .stream_recv_components
             .get_mut(&shard_recv_state_mut.stream_id)
         else {
-            debug!(
-                "Received packet from stream {} before subscribing!",
-                shard_recv_state_mut.stream_id
+            if shard_recv_state_mut.stream_id == VIDEO {
+                self.video_stream_stats.last_packet_metrics.shards_dropped += 1;
+            }
+            warn!(
+                "Dropped shard {} from packet {} from stream {} because received before subscribing!",
+                shard_recv_state_mut.shard_index, shard_recv_state_mut.packet_index, shard_recv_state_mut.stream_id
             );
             return alvr_common::try_again();
         };
@@ -698,23 +867,26 @@ impl StreamSocket {
         } else {
             // This branch may be hit in case the thread related to the stream hangs for some reason
             shard_recv_state_mut.should_discard = true;
-            shard_recv_state_mut.packet_cursor = 0; // reset cursor from old shards
-                                                    // always write at the start of the packet so the buffer doesn't grow much
-            shard_recv_state_mut.shard_index = 0;
-
+            if shard_recv_state_mut.stream_id == VIDEO {
+                self.video_stream_stats.last_packet_metrics.shards_dropped += 1;
+            }
+            warn!(
+                    "Dropped shard {} from packet {} from stream {} because the stream thread has hung!",
+                shard_recv_state_mut.shard_index, shard_recv_state_mut.packet_index, shard_recv_state_mut.stream_id
+                );
             &mut components.discarded_shards_sink
         };
 
-        let max_shard_data_size = self.max_packet_size - SHARD_PREFIX_SIZE;
+        let max_shard_data_size = self.max_shard_size - SHARD_PREFIX_SIZE;
         // Note: there is no prefix offset, since we want to write the prefix too.
-        let packet_start_index = shard_recv_state_mut.shard_index * max_shard_data_size;
+        let shard_start_index = shard_recv_state_mut.shard_index * max_shard_data_size;
 
         // Prepare buffer to accomodate receiving shard
         {
             // Note: this contains the prefix offset
             in_progress_packet.buffer_length = usize::max(
                 in_progress_packet.buffer_length,
-                packet_start_index + shard_recv_state_mut.shard_length,
+                shard_start_index + shard_recv_state_mut.shard_length,
             );
 
             if in_progress_packet.buffer.len() < in_progress_packet.buffer_length {
@@ -724,7 +896,7 @@ impl StreamSocket {
             }
         }
 
-        let sub_buffer = &mut in_progress_packet.buffer[packet_start_index..];
+        let sub_buffer = &mut in_progress_packet.buffer[shard_start_index..];
 
         // Read shard into the single contiguous buffer
         {
@@ -736,12 +908,12 @@ impl StreamSocket {
 
             // This loop may bail out at any time if a timeout is reached. This is correctly handled by
             // the previous code.
-            while shard_recv_state_mut.packet_cursor < shard_recv_state_mut.shard_length {
+            while shard_recv_state_mut.bytes_cursor < shard_recv_state_mut.shard_length {
                 let size = self.receive_socket.recv(
                     &mut sub_buffer
-                        [shard_recv_state_mut.packet_cursor..shard_recv_state_mut.shard_length],
+                        [shard_recv_state_mut.bytes_cursor..shard_recv_state_mut.shard_length],
                 )?;
-                shard_recv_state_mut.packet_cursor += size;
+                shard_recv_state_mut.bytes_cursor += size;
             }
 
             // Restore backed up bytes
@@ -750,52 +922,8 @@ impl StreamSocket {
                 .copy_from_slice(&shard_recv_state_mut.overwritten_data_backup.take().unwrap());
         }
 
-        let highest_packet_index = self
-            .highest_packet_index
-            .entry(shard_recv_state_mut.stream_id)
-            .or_insert(0);
-        let highest_shard_index = self
-            .highest_shard_index
-            .entry(shard_recv_state_mut.stream_id)
-            .or_insert(0);
-
-        if *highest_packet_index == shard_recv_state_mut.packet_index {
-            if *highest_shard_index < shard_recv_state_mut.shard_index {
-                *highest_shard_index = shard_recv_state_mut.shard_index;
-            } else {
-            }
-        } else if *highest_packet_index > std::u32::MAX - 257
-            && shard_recv_state_mut.packet_index < 257
-        {
-            *highest_packet_index = shard_recv_state_mut.packet_index;
-            *highest_shard_index = shard_recv_state_mut.shard_index;
-        } else if shard_recv_state_mut.packet_index > std::u32::MAX - 257
-            && *highest_packet_index < 257
-        {
-            // Do nothing
-        } else if *highest_packet_index < shard_recv_state_mut.packet_index {
-            *highest_packet_index = shard_recv_state_mut.packet_index;
-            *highest_shard_index = shard_recv_state_mut.shard_index;
-        }
-
-        let bytes_received = self
-            .bytes_received
-            .entry(shard_recv_state_mut.stream_id)
-            .or_insert(0);
-        *bytes_received += shard_recv_state_mut.shard_length + SHARD_PREFIX_SIZE;
-
-        let shards_received = self
-            .shards_received
-            .entry(shard_recv_state_mut.stream_id)
-            .or_insert(0);
-        *shards_received += 1;
-
-        let shards_duplicated = self
-            .shards_duplicated
-            .entry(shard_recv_state_mut.stream_id)
-            .or_insert(0);
-
         if !shard_recv_state_mut.should_discard {
+
             if !in_progress_packet
                 .received_shard_indices
                 .contains(&shard_recv_state_mut.shard_index)
@@ -804,92 +932,97 @@ impl StreamSocket {
                     .received_shard_indices
                     .insert(shard_recv_state_mut.shard_index);
 
-                self.packets_shards_instant
-                    .entry(shard_recv_state_mut.stream_id)
-                    .or_insert_with(HashMap::new)
+                self.video_stream_stats
+                    .packet_shards_instant
                     .entry(shard_recv_state_mut.packet_index)
                     .or_insert_with(VecDeque::new)
                     .push_back(now);
             } else {
-                *shards_duplicated += 1;
+                if shard_recv_state_mut.stream_id == VIDEO {
+                    self.video_stream_stats
+                        .last_packet_metrics
+                        .shards_duplicated += 1;
+                }
             }
         }
 
         // Check if packet is complete and send
         if in_progress_packet.received_shard_indices.len() == shard_recv_state_mut.shards_count {
-            let mut reception_interval = Duration::ZERO;
+            if shard_recv_state_mut.stream_id == VIDEO {
+                let mut reception_interval = Duration::ZERO;
 
-            let mut packet_span = Duration::ZERO;
-            let mut packet_shard_interval_average = Duration::ZERO;
-            let mut packet_shard_jitter = 0.0;
+                let mut packet_span = Duration::ZERO;
+                let mut shards_interval_average = 0.0;
+                let mut shards_jitter = 0.0;
 
-            match self
-                .packets_shards_instant
-                .entry(shard_recv_state_mut.stream_id)
-            {
-                Entry::Occupied(mut occupied) => {
-                    if let Some(shards_instant) = occupied
-                        .get_mut()
-                        .remove(&shard_recv_state_mut.packet_index)
+                let mut shards_intervals = Vec::new();
+                let mut shards_intervals_sum = 0.0;
+                let mut squared_deviation_sum = 0.0;
+
+                if let Some(shards_instant) = self
+                    .video_stream_stats
+                    .packet_shards_instant
+                    .remove(&shard_recv_state_mut.packet_index)
+                {
+                    if let (Some(first_instant), Some(last_instant)) =
+                        (shards_instant.front(), shards_instant.back())
                     {
-                        let mut packet_shard_intervals = Vec::new();
-                        let mut packet_shard_interval_sum = Duration::ZERO;
+                        packet_span = (*last_instant).duration_since(*first_instant);
 
-                        if shard_recv_state_mut.shards_count != shards_instant.len() {
-                            // remove
-                            debug!(
-                                "Shard instants for packet {} in stream {} not properly gathered.",
-                                shard_recv_state_mut.packet_index, shard_recv_state_mut.stream_id
-                            );
+                        let mut prev_instant = *first_instant;
+                        for &instant in shards_instant.iter().skip(1) {
+                            if instant < prev_instant {
+                                warn!(
+                                    "Shard instants for packet {} are not sorted increasingly!",
+                                    shard_recv_state_mut.packet_index
+                                );
+                            }
+                            let interval = instant.duration_since(prev_instant).as_secs_f32();
+                            shards_intervals.push(interval);
+                            shards_intervals_sum += interval;
+                            prev_instant = instant;
                         }
 
-                        if let (Some(first_instant), Some(last_instant)) =
-                            (shards_instant.front(), shards_instant.back())
-                        {
-                            let mut prev_instant = *first_instant;
-                            packet_span = (*last_instant).saturating_duration_since(*first_instant);
+                        let shards_intervals_count = shards_intervals.len() as f32;
+                        shards_interval_average = if !shards_intervals.is_empty() {
+                            shards_intervals_sum / shards_intervals_count
+                        } else {
+                            0.0
+                        };
 
-                            for &instant in shards_instant.iter().skip(1) {
-                                let interval = instant.saturating_duration_since(prev_instant);
-                                packet_shard_intervals.push(interval);
-                                packet_shard_interval_sum += interval;
-                                prev_instant = instant;
-                            }
-
-                            let packet_shard_interval_count = packet_shard_intervals.len();
-
-                            packet_shard_interval_average = if !packet_shard_intervals.is_empty() {
-                                packet_shard_interval_sum / packet_shard_interval_count as u32
-                            } else {
-                                Duration::ZERO
-                            };
-
-                            // Compute shard jitter within the packet
-                            let mut jitter_sum = 0.0;
-                            for interval in packet_shard_intervals {
-                                let deviation = (interval.as_secs_f32()
-                                    - packet_shard_interval_average.as_secs_f32())
-                                .abs();
-                                jitter_sum += deviation * deviation;
-                            }
-                            let mean_square_deviation =
-                                jitter_sum / (packet_shard_interval_count as f32);
-                            packet_shard_jitter = mean_square_deviation.sqrt();
-
-                            let prev_packet_instant = self
-                                .prev_packet_instant
-                                .entry(shard_recv_state_mut.stream_id)
-                                .or_insert(*first_instant);
-                            reception_interval =
-                                (*last_instant).saturating_duration_since(*prev_packet_instant);
-                            *prev_packet_instant = *last_instant;
+                        for interval in shards_intervals {
+                            let deviation = (interval - shards_interval_average).abs();
+                            squared_deviation_sum += deviation * deviation;
                         }
+                        let mean_square_deviation = squared_deviation_sum / shards_intervals_count;
+                        shards_jitter = mean_square_deviation.sqrt();
+
+                        reception_interval = (*last_instant)
+                            .saturating_duration_since(self.video_stream_stats.prev_packet_instant);
+                        self.video_stream_stats.prev_packet_instant = *last_instant;
                     }
                 }
-                _ => {}
-            }
+                self.video_stream_stats
+                    .last_packet_metrics
+                    .reception_interval += reception_interval;
 
+                self.video_stream_stats.last_packet_metrics.packet_span = packet_span;
+                self.video_stream_stats
+                    .last_packet_metrics
+                    .shards_interval_average = shards_interval_average;
+                self.video_stream_stats.last_packet_metrics.shards_jitter = shards_jitter;
+            }
             let size = in_progress_packet.buffer_length;
+            let (highest_packet_index, highest_shard_index, video_packet_metrics) =
+                if shard_recv_state_mut.stream_id == VIDEO {
+                    (
+                        Some(self.video_stream_stats.highest_packet_index),
+                        Some(self.video_stream_stats.highest_shard_index),
+                        Some(self.video_stream_stats.last_packet_metrics),
+                    )
+                } else {
+                    (None, None, None)
+                };
             components
                 .packet_queue
                 .send(ReconstructedPacket {
@@ -900,21 +1033,13 @@ impl StreamSocket {
                         .unwrap()
                         .buffer,
                     size,
-                    packet_span,
-                    packet_shard_interval_average,
-                    packet_shard_jitter,
-                    reception_interval,
-                    bytes_received: *bytes_received,
-                    shards_received: *shards_received,
-                    shards_duplicated: *shards_duplicated,
-                    highest_packet_index: *highest_packet_index,
-                    highest_shard_index: *highest_shard_index,
+                    highest_packet_index,
+                    highest_shard_index,
+                    video_packet_metrics,
                 })
                 .ok();
 
-            *bytes_received = 0;
-            *shards_received = 0;
-            *shards_duplicated = 0;
+            self.video_stream_stats.last_packet_metrics = VideoPacketMetrics::default();
 
             // Keep only shards with later packet index (using wrapping logic)
             while let Some((idx, _)) = components.in_progress_packets.iter().find(|(idx, _)| {

@@ -83,18 +83,19 @@ pub static STATISTICS_SENDER: OptLazy<StreamSender<ClientStatistics>> =
 #[derive(Copy, Clone)]
 pub struct VideoStatistics {
     pub frame_span: Duration,
-    pub frame_shard_interval_average: Duration,
-    pub frame_shard_jitter: f32,
+    pub shards_interval_average: f32,
+    pub shards_jitter: f32,
 
     pub reception_interval: Duration,
 
     pub bytes_received: usize,
     pub shards_received: usize,
 
-    pub frames_lost_discarded: usize,
+    pub frames_skipped: usize,
     pub frames_discarded: usize,
     pub frames_dropped: usize,
 
+    pub shards_dropped: usize,
     pub shards_duplicated: usize,
 
     pub highest_frame_index: u32,
@@ -322,19 +323,34 @@ fn connection_pipeline(
 
     let video_receive_thread = thread::spawn(move || {
         let mut stream_corrupted = false;
+
         let mut reception_interval = Duration::ZERO;
         let mut bytes_received = 0;
         let mut shards_received = 0;
-        let mut packets_lost_discarded = 0;
+        let mut packets_skipped = 0;
         let mut packets_discarded = 0;
         let mut packets_dropped = 0;
+        let mut shards_dropped = 0;
         let mut shards_duplicated = 0;
+
         while is_streaming() {
             let data = match video_receiver.recv(STREAMING_RECV_TIMEOUT) {
                 Ok(data) => data,
                 Err(ConnectionError::TryAgain(_)) => continue,
                 Err(ConnectionError::Other(_)) => return,
             };
+            // Video stream metrics
+            {
+                reception_interval += data.get_reception_interval().unwrap_or(Duration::ZERO);
+                bytes_received += data.get_bytes_received().unwrap_or(0);
+                shards_received += data.get_shards_received().unwrap_or(0);
+                shards_dropped += data.get_shards_dropped().unwrap_or(0);
+                shards_duplicated += data.get_shards_duplicated().unwrap_or(0);
+                packets_skipped += data.get_packets_skipped().unwrap_or(0);
+                packets_discarded += data.get_packets_discarded().unwrap_or(0);
+
+                video_receiver.clear_video_stream_metrics();
+            }
             let Ok((header, nal)) = data.get() else {
                 return;
             };
@@ -345,21 +361,16 @@ fn connection_pipeline(
 
             if header.is_idr {
                 stream_corrupted = false;
-            } else if data.get_packets_lost_discarded() != 0 {
-                stream_corrupted = true;
-
-                warn!(
-                    "Network lost or delayed video packet/s: {}",
-                    data.get_packets_lost_discarded()
-                );
+            } else {
+                if data.had_packet_skip() {
+                    stream_corrupted = true;
+                    warn!(
+                        "Network lost or delayed {} video packets previous to receiving packet {}",
+                        data.get_packets_skipped().unwrap_or(0),
+                        data.get_index()
+                    );
+                }
             }
-
-            reception_interval += data.get_reception_interval();
-            bytes_received += data.get_bytes_received();
-            shards_received += data.get_shards_received();
-            packets_lost_discarded += data.get_packets_lost_discarded();
-            packets_discarded += data.get_packets_discarded();
-            shards_duplicated += data.get_shards_duplicated();
 
             if !stream_corrupted || !settings.connection.avoid_video_glitching {
                 if !decoder::push_nal(header.timestamp, nal) {
@@ -368,37 +379,47 @@ fn connection_pipeline(
                         sender.send(&ClientControlPacket::RequestIdr).ok();
                     }
                     packets_dropped += 1;
-                    warn!("Dropped video packet. Reason: Decoder saturation")
+                    warn!(
+                        "Dropped video packet {}. Reason: Decoder saturation",
+                        data.get_index()
+                    );
                 } else {
                     let video_stats = VideoStatistics {
-                        frame_span: data.get_packet_span(),
-                        frame_shard_interval_average: data.get_packet_shard_interval_average(),
-                        frame_shard_jitter: data.get_packet_shard_jitter(),
+                        frame_span: data.get_packet_span().unwrap_or(Duration::ZERO),
+                        shards_interval_average: data
+                            .get_shards_interval_average()
+                            .unwrap_or(0.0),
+                        shards_jitter: data.get_shards_jitter().unwrap_or(0.0),
 
-                        reception_interval: reception_interval,
+                        reception_interval,
 
-                        bytes_received: bytes_received,
-                        shards_received: shards_received,
+                        bytes_received,
+                        shards_received,
 
-                        frames_lost_discarded: packets_lost_discarded,
+                        frames_skipped: packets_skipped,
                         frames_discarded: packets_discarded,
                         frames_dropped: packets_dropped,
 
-                        shards_duplicated: shards_duplicated,
+                        shards_dropped,
+                        shards_duplicated,
 
-                        highest_frame_index: data.get_highest_packet_index(),
-                        highest_shard_index: data.get_highest_shard_index(),
+                        highest_frame_index: data.get_highest_packet_index().unwrap_or(0),
+                        highest_shard_index: data.get_highest_shard_index().unwrap_or(0),
                     };
 
                     if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
                         stats.report_video_statistics(header.timestamp, video_stats);
                     }
+
+                    warn!("Video statistics reported for frame {}", data.get_index()); // remove
+
                     reception_interval = Duration::ZERO;
                     bytes_received = 0;
                     shards_received = 0;
-                    packets_lost_discarded = 0;
+                    packets_skipped = 0;
                     packets_discarded = 0;
                     packets_dropped = 0;
+                    shards_dropped = 0;
                     shards_duplicated = 0;
                 }
             } else {
@@ -406,7 +427,10 @@ fn connection_pipeline(
                     sender.send(&ClientControlPacket::RequestIdr).ok();
                 }
                 packets_dropped += 1;
-                warn!("Dropped video packet. Reason: Waiting for IDR frame")
+                warn!(
+                    "Dropped video packet {}. Reason: Waiting for IDR frame",
+                    data.get_index()
+                );
             }
         }
     });

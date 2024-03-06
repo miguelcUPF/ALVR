@@ -37,6 +37,7 @@ use alvr_sockets::{
     PeerType, ProtoControlSocket, StreamSender, StreamSocketBuilder, KEEPALIVE_INTERVAL,
     KEEPALIVE_TIMEOUT,
 };
+use indexmap::IndexMap;
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
@@ -603,9 +604,9 @@ fn connection_pipeline(
                     .copy_from_slice(&payload);
                 video_sender.send(buffer).ok();
 
-                let packet_index = video_sender.get_prev_packet_index();
-                let shards_bytes = video_sender.get_shards_bytes();
-                let shards_instant = video_sender.get_shards_instant();
+                let packet_index = video_sender.get_next_packet_index().saturating_sub(1);
+                let shards_bytes = video_sender.get_shards_bytes().unwrap_or(IndexMap::new());
+                let shards_instant = video_sender.get_shards_instant().unwrap_or(IndexMap::new());
 
                 if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
                     stats.report_frame_transmitted(

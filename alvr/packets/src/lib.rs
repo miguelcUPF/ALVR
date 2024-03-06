@@ -201,8 +201,8 @@ pub struct ClientStatistics {
     pub frame_interval_decode: Duration,
     pub frame_interval_vsync: Duration,
     pub frame_span: Duration,
-    pub frame_shard_interval_average: Duration,
-    pub frame_shard_jitter: f32,
+    pub shards_interval_average: f32,
+    pub shards_jitter: f32,
 
     //// Latency metrics
     pub video_decode: Duration,
@@ -217,10 +217,11 @@ pub struct ClientStatistics {
     pub bytes_received: usize, // including prefix
     pub shards_received: usize,
 
-    pub frames_lost_discarded: usize,
+    pub frames_skipped: usize,
     pub frames_discarded: usize,
     pub frames_dropped: usize,
 
+    pub shards_dropped: usize,
     pub shards_duplicated: usize,
 
     pub highest_frame_index: u32,

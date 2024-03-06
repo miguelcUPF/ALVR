@@ -322,7 +322,7 @@ impl StatisticsManager {
         let interval_secs = STATS_SUMMARY_INTERVAL.as_secs_f32();
 
         alvr_events::send_event(EventType::StatisticsSummary(StatisticsSummary {
-            total_frames_sent: self.total_frames_sent,
+            total_frames_sent: self.total_frames_sent, // TODO: modify, interval_secs should be also modified by a sum of reception_interval because it does not apply to the client i think
             frames_sent_per_sec: (self.partial_sum_frames_sent as f32 / interval_secs) as _,
 
             total_frames_received: self.total_frames_received,
@@ -453,6 +453,21 @@ impl StatisticsManager {
                 + client_stats.vsync_queue,
         );
 
+        self.total_pipeline_latency_average
+            .submit_sample(client_stats.total_pipeline_latency);
+        self.game_delay_average.submit_sample(game_delay);
+        self.server_compositor_average.submit_sample(rendering);
+        self.encode_delay_average.submit_sample(video_encode);
+        self.network_delay_average.submit_sample(network);
+        self.decode_delay_average
+            .submit_sample(client_stats.video_decode);
+        self.decoder_queue_delay_average
+            .submit_sample(client_stats.video_decoder_queue);
+        self.client_compositor_average
+            .submit_sample(client_stats.rendering);
+        self.vsync_queue_delay_average
+            .submit_sample(client_stats.vsync_queue);
+
         //// Frame data
         let is_idr = frame.server_stats.is_idr;
         let frame_index = frame.server_stats.frame_index;
@@ -500,29 +515,39 @@ impl StatisticsManager {
                 .as_secs_f32();
 
         //// Frame timing metrics
+        let now = Instant::now();
         let shards_instant = frame.server_stats.shards_instant;
-        let first_instant = *shards_instant.values().min().unwrap_or(&Instant::now());
-        let last_instant = *shards_instant.values().max().unwrap_or(&Instant::now());
+        let first_instant = *shards_instant.values().min().unwrap_or(&now);
+        let last_instant = *shards_instant.values().max().unwrap_or(&now);
 
-        let frame_span = last_instant.saturating_duration_since(first_instant);
+        let frame_span = last_instant.duration_since(first_instant);
         let client_frame_span = client_stats.frame_span;
 
-        let mut frame_shard_interval_sum = Duration::ZERO;
+        let mut shards_intervals_sum = 0.0;
+        let mut shards_intervals_count = 0.0;
+
         let mut prev_instant = first_instant;
         for &instant in shards_instant.values().skip(1) {
-            let interval = instant.saturating_duration_since(prev_instant);
-            frame_shard_interval_sum += interval;
+            if instant < prev_instant {
+                debug!(
+                    "Server shard instants for packet {} are not sorted increasingly!",
+                    frame_index
+                );
+            }
+            let interval = instant.duration_since(prev_instant).as_secs_f32();
+            shards_intervals_sum += interval;
+            shards_intervals_count += 1.;
             prev_instant = instant;
         }
 
-        let frame_shard_interval_average = if shards_count > 1 {
-            frame_shard_interval_sum / (shards_count - 1) as u32
+        let server_shards_interval_average = if shards_intervals_count > 0.0 {
+            shards_intervals_sum / shards_intervals_count
         } else {
-            Duration::ZERO
+            0.0
         };
-        let client_frame_shard_interval_average = client_stats.frame_shard_interval_average;
+        let client_shards_interval_average = client_stats.shards_interval_average;
 
-        let frame_shard_jitter = client_stats.frame_shard_jitter;
+        let shards_jitter = client_stats.shards_jitter;
 
         // Interval video statistics
         //// Given that the server and client are not synchronized, we use the last frame
@@ -552,15 +577,15 @@ impl StatisticsManager {
 
         let frames_discarded = client_stats.frames_discarded;
 
-        let frames_lost = client_stats.frames_lost_discarded - frames_discarded;
+        let frames_skipped = client_stats.frames_skipped;
 
         let frames_dropped = client_stats.frames_dropped;
 
         let mut frames_received = 0;
 
-        if frames_sent >= frames_lost as u32 {
-            frames_received = frames_sent - frames_lost as u32;
-        }
+        if frames_sent >= (frames_skipped - frames_discarded) as u32 {
+            frames_received = frames_sent - (frames_skipped  + frames_discarded) as u32;
+        } 
 
         let mut last_shard_received_instant = Instant::now();
 
@@ -617,13 +642,7 @@ impl StatisticsManager {
                 .iter_mut()
                 .filter(|frame| {
                     let frame_idx = frame.server_stats.frame_index;
-
-                    if highest_idx < 257 && prev_idx > std::u32::MAX - 257 {
-                        (frame_idx > prev_idx && frame_idx <= std::u32::MAX)
-                            || (frame_idx <= highest_idx)
-                    } else {
-                        frame_idx > prev_idx && frame_idx <= highest_idx
-                    }
+                    frame_idx > prev_idx && frame_idx < highest_idx
                 })
                 .flat_map(|frame| frame.server_stats.shards_bytes.values())
                 .count();
@@ -632,13 +651,7 @@ impl StatisticsManager {
                 .iter_mut()
                 .filter(|frame| {
                     let frame_idx = frame.server_stats.frame_index;
-
-                    if highest_idx < 257 && prev_idx > std::u32::MAX - 257 {
-                        (frame_idx > prev_idx && frame_idx <= std::u32::MAX)
-                            || (frame_idx <= highest_idx)
-                    } else {
-                        frame_idx > prev_idx && frame_idx <= highest_idx
-                    }
+                    frame_idx > prev_idx && frame_idx < highest_idx
                 })
                 .flat_map(|frame| frame.server_stats.shards_bytes.values())
                 .sum::<usize>();
@@ -660,6 +673,8 @@ impl StatisticsManager {
 
         let shards_lost = shards_sent - client_stats.shards_received;
 
+        let shards_dropped = client_stats.shards_dropped;
+
         let shards_duplicated = client_stats.shards_duplicated;
 
         let shards_received = client_stats.shards_received;
@@ -674,7 +689,7 @@ impl StatisticsManager {
         let mbits_received_per_sec = (bytes_received as f32 * 8.)
             / (1e6)
             / client_stats
-                .frame_interval
+                .reception_interval
                 .max(Duration::from_millis(1))
                 .as_secs_f32();
 
@@ -702,10 +717,9 @@ impl StatisticsManager {
             // Frame timing metrics
             frame_span_s: frame_span.as_secs_f32(),
             client_frame_span_s: client_frame_span.as_secs_f32(),
-            frame_shard_interval_average_s: frame_shard_interval_average.as_secs_f32(),
-            client_frame_shard_interval_average_s: client_frame_shard_interval_average
-                .as_secs_f32(),
-            frame_shard_jitter_s: frame_shard_jitter,
+            server_shards_interval_average_s: server_shards_interval_average,
+            client_shards_interval_average_s: client_shards_interval_average,
+            shards_jitter_s: shards_jitter,
             // Interval video statistics
             bytes_sent,     // including prefix
             bytes_received, // including prefix
@@ -713,11 +727,12 @@ impl StatisticsManager {
             shards_sent,
             shards_received,
             shards_lost,
+            shards_dropped,
             shards_duplicated,
 
             frames_sent: frames_sent as usize,
             frames_received: frames_received as usize,
-            frames_lost,
+            frames_skipped,
             frames_discarded,
             frames_dropped,
         }));

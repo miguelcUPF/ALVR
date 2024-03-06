@@ -95,18 +95,19 @@ impl StatisticsManager {
             .find(|frame| frame.client_stats.target_timestamp == target_timestamp)
         {
             frame.client_stats.frame_span = stats.frame_span;
-            frame.client_stats.frame_shard_interval_average = stats.frame_shard_interval_average;
-            frame.client_stats.frame_shard_jitter = stats.frame_shard_jitter;
+            frame.client_stats.shards_interval_average = stats.shards_interval_average;
+            frame.client_stats.shards_jitter = stats.shards_jitter;
 
             frame.client_stats.reception_interval = stats.reception_interval;
 
             frame.client_stats.bytes_received = stats.bytes_received;
             frame.client_stats.shards_received = stats.shards_received;
 
-            frame.client_stats.frames_lost_discarded = stats.frames_lost_discarded;
+            frame.client_stats.frames_skipped = stats.frames_skipped;
             frame.client_stats.frames_discarded = stats.frames_discarded;
             frame.client_stats.frames_dropped = stats.frames_dropped;
 
+            frame.client_stats.shards_dropped = stats.shards_dropped;
             frame.client_stats.shards_duplicated = stats.shards_duplicated;
 
             frame.client_stats.highest_frame_index = stats.highest_frame_index;

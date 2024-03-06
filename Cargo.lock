@@ -414,6 +414,7 @@ name = "alvr_sockets"
 version = "21.0.0-dev00"
 dependencies = [
  "alvr_common",
+ "alvr_packets",
  "alvr_session",
  "bincode",
  "indexmap 1.9.3",
