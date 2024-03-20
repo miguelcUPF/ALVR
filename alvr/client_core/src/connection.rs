@@ -82,6 +82,8 @@ pub static STATISTICS_SENDER: OptLazy<StreamSender<ClientStatistics>> =
 
 #[derive(Copy, Clone)]
 pub struct VideoStatistics {
+    pub packet_index: u32,
+
     pub frame_span: Duration,
     pub shards_interval_average: f32,
     pub shards_jitter: f32,
@@ -385,6 +387,7 @@ fn connection_pipeline(
                     );
                 } else {
                     let video_stats = VideoStatistics {
+                        packet_index: data.get_index(),
                         frame_span: data.get_packet_span().unwrap_or(Duration::ZERO),
                         shards_interval_average: data
                             .get_shards_interval_average()

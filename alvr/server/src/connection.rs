@@ -965,6 +965,7 @@ fn connection_pipeline(
                 let Ok(client_stats) = data.get_header() else {
                     return;
                 };
+                warn!("statistics received for frame {}", client_stats.packet_index); // remove
 
                 if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
                     let timestamp = client_stats.target_timestamp;

@@ -8,7 +8,7 @@ use std::{path::PathBuf, time::Duration};
 pub struct Statistics {
     // Frame data
     pub is_idr: bool,
-    pub frame_index: u32,
+    pub frame_index: i32,
     pub frame_bytes: usize,
     pub shards_count: usize,
     pub frame_bytes_sent: usize,

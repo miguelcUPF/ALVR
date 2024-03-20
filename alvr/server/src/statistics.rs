@@ -1,4 +1,4 @@
-use alvr_common::{debug, warn, SlidingWindowAverage, HEAD_ID};
+use alvr_common::{warn, SlidingWindowAverage, HEAD_ID};
 use alvr_events::{EventType, GraphStatistics, NominalBitrateStats, Statistics, StatisticsSummary};
 use alvr_packets::ClientStatistics;
 use indexmap::IndexMap;
@@ -15,7 +15,7 @@ pub struct ServerStatistics {
     pub target_timestamp: Duration,
 
     pub is_idr: bool,
-    pub frame_index: u32,
+    pub frame_index: i32, // i32 to be negative at initialization
     pub bytes: usize,
     pub shards_bytes: IndexMap<u16, usize>, // including prefix
     pub shards_instant: IndexMap<u16, Instant>,
@@ -31,7 +31,7 @@ impl Default for ServerStatistics {
         Self {
             target_timestamp: Duration::ZERO,
             is_idr: false,
-            frame_index: 0,
+            frame_index: -1,
             bytes: 0,
             shards_bytes: IndexMap::new(),
             shards_instant: IndexMap::new(),
@@ -48,7 +48,8 @@ pub struct HistoryFrame {
     frame_presented: Instant,
     frame_composed: Instant,
     frame_encoded: Instant,
-    frame_transmitted: Instant,
+
+    is_encoded: bool,
 
     pub server_stats: ServerStatistics,
 }
@@ -61,7 +62,8 @@ impl Default for HistoryFrame {
             frame_presented: now,
             frame_composed: now,
             frame_encoded: now,
-            frame_transmitted: now,
+
+            is_encoded: false,
 
             server_stats: Default::default(),
         }
@@ -181,6 +183,7 @@ impl StatisticsManager {
         }
     }
 
+    // Note: uses the timestamp since the associated frame indexes are not yet known
     pub fn report_tracking_received(&mut self, target_timestamp: Duration) {
         if !self
             .history_buffer
@@ -220,6 +223,7 @@ impl StatisticsManager {
     }
 
     pub fn report_frame_composed(&mut self, target_timestamp: Duration, offset: Duration) {
+
         if let Some(frame) = self
             .history_buffer
             .iter_mut()
@@ -230,6 +234,7 @@ impl StatisticsManager {
             frame.frame_composed = now;
         }
     }
+
     // returns encoding delay
     pub fn report_frame_encoded(
         &mut self,
@@ -237,12 +242,19 @@ impl StatisticsManager {
         bytes: usize,
         is_idr: bool,
     ) -> Duration {
-        if let Some(frame) = self
-            .history_buffer
-            .iter_mut()
-            .find(|frame| frame.server_stats.target_timestamp == target_timestamp)
-        {
-            let now = Instant::now();
+        warn!(
+            "frame {} encoded now {:?} bytes {}",
+            target_timestamp.as_secs_f64(),
+            Instant::now(),
+            bytes
+        ); // remove
+
+        let now = Instant::now();
+
+        if let Some(frame) = self.history_buffer.iter_mut().find(|frame| {
+            frame.server_stats.target_timestamp == target_timestamp && !frame.is_encoded
+        }) {
+            frame.is_encoded = true;
 
             frame.frame_encoded = now;
 
@@ -252,6 +264,25 @@ impl StatisticsManager {
 
             let frame_interval_encode = now.saturating_duration_since(self.prev_encoding);
             frame.server_stats.frame_interval_encode = frame_interval_encode;
+
+            self.prev_encoding = now;
+
+            frame_interval_encode
+        } else if let Some(frame) = self
+            .history_buffer
+            .iter_mut()
+            .find(|frame| frame.server_stats.target_timestamp == target_timestamp)
+        {
+            // if it is not the first frame encoded associated with the target_timestamp do not update the latency related variables
+            let mut cloned_frame = (*frame).clone();
+            cloned_frame.server_stats.is_idr = is_idr;
+
+            cloned_frame.server_stats.bytes = bytes;
+
+            let frame_interval_encode = now.saturating_duration_since(self.prev_encoding);
+            cloned_frame.server_stats.frame_interval_encode = frame_interval_encode;
+
+            self.history_buffer.push_back(cloned_frame);
 
             self.prev_encoding = now;
 
@@ -275,24 +306,23 @@ impl StatisticsManager {
         self.partial_sum_frames_sent += 1;
         self.partial_sum_bytes_sent += shards_bytes.values().sum::<usize>(); // remove
         self.partial_sum_shards_sent += shards_bytes.values().count(); // remove
+        
+        if let Some(frame) = self.history_buffer.iter_mut().find(|frame| {
+            frame.server_stats.target_timestamp == target_timestamp
+                && frame.server_stats.frame_index == -1
+        }) {
+            // find the first frame in the buffer associated with the target_timestamp that has not been yet transmitted
 
-        if let Some(frame) = self
-            .history_buffer
-            .iter_mut()
-            .find(|frame| frame.server_stats.target_timestamp == target_timestamp)
-        {
             let last_instant = *shards_instant.values().last().unwrap_or(&Instant::now());
-
-            frame.frame_transmitted = last_instant;
 
             frame.server_stats.frame_interval =
                 last_instant.saturating_duration_since(self.prev_transmission);
 
-            self.prev_transmission = last_instant;
-
-            frame.server_stats.frame_index = packet_index;
+            frame.server_stats.frame_index = packet_index as i32;
             frame.server_stats.shards_bytes = shards_bytes;
             frame.server_stats.shards_instant = shards_instant;
+
+            self.prev_transmission = last_instant;
         }
     }
 
@@ -392,29 +422,32 @@ impl StatisticsManager {
             self.prev_stats_summary_instant = Instant::now();
             self.report_statistics_summary();
         }
+        warn!("server try report stats frame {}", client_stats.packet_index); // remove
 
         let frame = match self
             .history_buffer
             .iter_mut()
-            .find(|frame| frame.server_stats.target_timestamp == client_stats.target_timestamp)
+            .find(|frame| frame.server_stats.frame_index == client_stats.packet_index as i32)
         {
             Some(frame_searched) => frame_searched.clone(),
             None => {
-                debug!("Frame not found in history buffer!");
+                warn!("Frame {} not found in history buffer!", client_stats.packet_index);
                 return Duration::ZERO;
             }
         };
+        warn!("Frame {} server reporting statistics!", client_stats.packet_index); // remove
 
-        let highest_frame_received = if frame.server_stats.frame_index
-            == client_stats.highest_frame_index
-        {
-            frame.clone()
-        } else {
-            self.history_buffer
-                .iter_mut()
-                .find(|frame_| frame_.server_stats.frame_index == client_stats.highest_frame_index)
-                .map_or_else(|| frame.clone(), |frame_searched| frame_searched.clone())
-        };
+        let highest_frame_received =
+            if frame.server_stats.frame_index == client_stats.highest_frame_index as i32 {
+                frame.clone()
+            } else {
+                self.history_buffer
+                    .iter_mut()
+                    .find(|frame_| {
+                        frame_.server_stats.frame_index == client_stats.highest_frame_index as i32
+                    })
+                    .map_or_else(|| frame.clone(), |frame_searched| frame_searched.clone())
+            };
 
         // Frame statistics
         //// Latency metrics
@@ -461,7 +494,7 @@ impl StatisticsManager {
         let is_idr = frame.server_stats.is_idr;
         let frame_index = frame.server_stats.frame_index;
         let frame_bytes = frame.server_stats.bytes;
-        let shards_count = frame.server_stats.shards_instant.len();
+        let shards_count = frame.server_stats.shards_bytes.len();
         let frame_bytes_sent = frame.server_stats.shards_bytes.values().sum();
 
         //// Frame rate metrics
@@ -570,11 +603,11 @@ impl StatisticsManager {
 
         let frames_dropped = client_stats.frames_dropped;
 
-        let mut frames_received = 0; // I would remove frames sent and received
+        let mut frames_received = 0; 
 
-        if frames_sent >= (frames_skipped - frames_discarded) as u32 { // CHANGE
-            frames_received = frames_sent - (frames_skipped  + frames_discarded) as u32;
-        } 
+        if frames_sent >= (frames_skipped - frames_discarded) as i32 {
+            frames_received = frames_sent - (frames_skipped + frames_discarded) as i32;
+        }
 
         let mut last_shard_received_instant = Instant::now();
 
@@ -589,7 +622,7 @@ impl StatisticsManager {
         let transmission_interval = last_shard_received_instant
             .saturating_duration_since(self.prev_last_shard_received_instant);
 
-        let shards_sent;
+        let shards_sent; // TODO: gestionar en base a shards_skipped para evitar si se pierden stats en el UL
         let bytes_sent;
 
         if highest_idx == prev_idx {

@@ -190,11 +190,12 @@ pub enum ClientListAction {
     SetConnectionState(ConnectionState),
 }
 
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct ClientStatistics {
     // Frame statistics
     //// Frame data
-    pub target_timestamp: Duration, // Identifies the frame
+    pub target_timestamp: Duration, // associates the frame and the tracking
+    pub packet_index: i32, // Identifies the frame uniquely
 
     //// Frame timing metrics
     pub frame_interval: Duration,
@@ -226,6 +227,37 @@ pub struct ClientStatistics {
 
     pub highest_frame_index: u32,
     pub highest_shard_index: usize,
+}
+
+
+impl Default for ClientStatistics {
+    fn default() -> Self {
+        ClientStatistics {
+            target_timestamp: Duration::default(),
+            packet_index: -1,
+            frame_interval: Duration::default(),
+            frame_interval_decode: Duration::default(),
+            frame_interval_vsync: Duration::default(),
+            frame_span: Duration::default(),
+            shards_interval_average: 0.0,
+            shards_jitter: 0.0,
+            video_decode: Duration::default(),
+            video_decoder_queue: Duration::default(),
+            rendering: Duration::default(),
+            vsync_queue: Duration::default(),
+            total_pipeline_latency: Duration::default(),
+            reception_interval: Duration::default(),
+            bytes_received: 0,
+            shards_received: 0,
+            frames_skipped: 0,
+            frames_discarded: 0,
+            frames_dropped: 0,
+            shards_dropped: 0,
+            shards_duplicated: 0,
+            highest_frame_index: 0,
+            highest_shard_index: 0,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
