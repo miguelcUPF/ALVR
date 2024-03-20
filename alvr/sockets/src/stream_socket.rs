@@ -390,16 +390,19 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
             Ordering::Greater => {
                 // Skipped some indices
                 had_packet_skip = true;
-                self.packets_skipped = self
-                    .packets_skipped
-                    .map(|x| x + packet.index.wrapping_sub(self.next_packet_index) as usize);
-
-                warn!("Skipped packets from stream {}!", self.stream_id);
+                if self.stream_id == VIDEO {
+                    self.packets_skipped = self
+                        .packets_skipped
+                        .map(|x| x + packet.index.wrapping_sub(self.next_packet_index) as usize);
+                    warn!("Skipped {} video packets!", self.packets_skipped.unwrap());
+                }
             }
             Ordering::Less => {
                 // Old packet, discard
-                self.packets_discarded = self.packets_discarded.map(|x| x + 1);
-                warn!("Discarded a packet from stream {}!", self.stream_id);
+                if self.stream_id == VIDEO {
+                    self.packets_discarded = self.packets_discarded.map(|x| x + 1);
+                    warn!("Discarded video packet {}!", packet.index);
+                }
                 self.used_buffer_queue.send(packet.buffer).to_con()?;
                 return alvr_common::try_again();
             }
@@ -799,8 +802,6 @@ impl StreamSocket {
             })
         };
 
-        // TODO: does it take the same twice?
-
         if shard_recv_state_mut.stream_id == VIDEO {
             self.video_stream_stats.last_packet_metrics.bytes_received +=
                 shard_recv_state_mut.shard_length;
@@ -826,11 +827,11 @@ impl StreamSocket {
         else {
             if shard_recv_state_mut.stream_id == VIDEO {
                 self.video_stream_stats.last_packet_metrics.shards_dropped += 1;
+                warn!(
+                    "Dropped shard {} from video packet {} because received before subscribing!",
+                    shard_recv_state_mut.shard_index, shard_recv_state_mut.packet_index
+                );
             }
-            warn!(
-                "Dropped shard {} from packet {} from stream {} because received before subscribing!",
-                shard_recv_state_mut.shard_index, shard_recv_state_mut.packet_index, shard_recv_state_mut.stream_id
-            );
             return alvr_common::try_again();
         };
 
@@ -869,11 +870,11 @@ impl StreamSocket {
             shard_recv_state_mut.should_discard = true;
             if shard_recv_state_mut.stream_id == VIDEO {
                 self.video_stream_stats.last_packet_metrics.shards_dropped += 1;
-            }
-            warn!(
-                    "Dropped shard {} from packet {} from stream {} because the stream thread has hung!",
-                shard_recv_state_mut.shard_index, shard_recv_state_mut.packet_index, shard_recv_state_mut.stream_id
+                warn!(
+                    "Dropped shard {} from video packet {} because the stream thread has hung!",
+                shard_recv_state_mut.shard_index, shard_recv_state_mut.packet_index
                 );
+            }
             &mut components.discarded_shards_sink
         };
 
@@ -931,17 +932,22 @@ impl StreamSocket {
                 in_progress_packet
                     .received_shard_indices
                     .insert(shard_recv_state_mut.shard_index);
-
-                self.video_stream_stats
-                    .packet_shards_instant
-                    .entry(shard_recv_state_mut.packet_index)
-                    .or_insert_with(VecDeque::new)
-                    .push_back(now);
+                if shard_recv_state_mut.stream_id == VIDEO {
+                    self.video_stream_stats
+                        .packet_shards_instant
+                        .entry(shard_recv_state_mut.packet_index)
+                        .or_insert_with(VecDeque::new)
+                        .push_back(now);
+                }
             } else {
                 if shard_recv_state_mut.stream_id == VIDEO {
                     self.video_stream_stats
                         .last_packet_metrics
                         .shards_duplicated += 1;
+                    warn!(
+                        "Duplicated shard {} from video packet {}!",
+                        shard_recv_state_mut.shard_index, shard_recv_state_mut.packet_index
+                    );
                 }
             }
         }
@@ -973,7 +979,7 @@ impl StreamSocket {
                         for &instant in shards_instant.iter().skip(1) {
                             if instant < prev_instant {
                                 warn!(
-                                    "Shard instants for packet {} are not sorted increasingly!",
+                                    "Shard instants for video packet {} are not sorted increasingly!",
                                     shard_recv_state_mut.packet_index
                                 );
                             }

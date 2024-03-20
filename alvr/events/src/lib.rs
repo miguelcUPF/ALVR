@@ -23,7 +23,7 @@ pub struct Statistics {
     pub bytes_received: usize,
     pub shards_sent: usize,
     pub shards_received: usize,
-    pub shards_lost: usize,
+    pub shards_lost: f32,
     pub shards_dropped: usize,
     pub shards_duplicated: usize,
     pub frames_sent: usize,

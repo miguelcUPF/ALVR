@@ -1,4 +1,4 @@
-use alvr_common::{debug, SlidingWindowAverage, HEAD_ID};
+use alvr_common::{debug, warn, SlidingWindowAverage, HEAD_ID};
 use alvr_events::{EventType, GraphStatistics, NominalBitrateStats, Statistics, StatisticsSummary};
 use alvr_packets::ClientStatistics;
 use indexmap::IndexMap;
@@ -268,13 +268,13 @@ impl StatisticsManager {
         shards_bytes: IndexMap<u16, usize>,
         shards_instant: IndexMap<u16, Instant>,
     ) {
-        self.total_frames_sent += 1;
-        self.total_bytes_sent += shards_bytes.values().sum::<usize>();
-        self.total_shards_sent += shards_bytes.values().count();
+        self.total_frames_sent += 1; // remove
+        self.total_bytes_sent += shards_bytes.values().sum::<usize>(); // remove
+        self.total_shards_sent += shards_bytes.values().count(); // remove
 
         self.partial_sum_frames_sent += 1;
-        self.partial_sum_bytes_sent += shards_bytes.values().sum::<usize>();
-        self.partial_sum_shards_sent += shards_bytes.values().count();
+        self.partial_sum_bytes_sent += shards_bytes.values().sum::<usize>(); // remove
+        self.partial_sum_shards_sent += shards_bytes.values().count(); // remove
 
         if let Some(frame) = self
             .history_buffer
@@ -289,17 +289,6 @@ impl StatisticsManager {
                 last_instant.saturating_duration_since(self.prev_transmission);
 
             self.prev_transmission = last_instant;
-
-            debug!(
-                "Frame {} encoded instant {}",
-                packet_index,
-                format!("{:?}", frame.frame_encoded)
-            ); // remove
-            debug!(
-                "Frame {} sent instant {}",
-                packet_index,
-                format!("{:?}", last_instant)
-            ); // remove
 
             frame.server_stats.frame_index = packet_index;
             frame.server_stats.shards_bytes = shards_bytes;
@@ -529,7 +518,7 @@ impl StatisticsManager {
         let mut prev_instant = first_instant;
         for &instant in shards_instant.values().skip(1) {
             if instant < prev_instant {
-                debug!(
+                warn!(
                     "Server shard instants for packet {} are not sorted increasingly!",
                     frame_index
                 );
@@ -581,9 +570,9 @@ impl StatisticsManager {
 
         let frames_dropped = client_stats.frames_dropped;
 
-        let mut frames_received = 0;
+        let mut frames_received = 0; // I would remove frames sent and received
 
-        if frames_sent >= (frames_skipped - frames_discarded) as u32 {
+        if frames_sent >= (frames_skipped - frames_discarded) as u32 { // CHANGE
             frames_received = frames_sent - (frames_skipped  + frames_discarded) as u32;
         } 
 
@@ -671,7 +660,7 @@ impl StatisticsManager {
             bytes_sent = bytes_from_prev + bytes_in_between + bytes_from_last;
         }
 
-        let shards_lost = shards_sent - client_stats.shards_received;
+        let shards_lost = shards_sent as f32 - client_stats.shards_received as f32;
 
         let shards_dropped = client_stats.shards_dropped;
 
