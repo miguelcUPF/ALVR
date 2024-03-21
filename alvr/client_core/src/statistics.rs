@@ -1,5 +1,5 @@
 use crate::connection::VideoStatistics;
-use alvr_common::{warn, SlidingWindowAverage};
+use alvr_common::SlidingWindowAverage;
 use alvr_packets::ClientStatistics;
 use std::{
     collections::VecDeque,
@@ -226,14 +226,6 @@ impl StatisticsManager {
         {
             if let Some(frame) = self.stats_hist_buffer.remove(index) {
                 let client_stats = frame.client_stats;
-                warn!(
-                    "summary sent for frame {}",
-                    client_stats.packet_index
-                ); // remove
-                warn!(
-                    "summary sent with following video decode stats {}",
-                    client_stats.video_decode.as_secs_f64()
-                ); // remove
                 Some(client_stats)
             } else {
                 None

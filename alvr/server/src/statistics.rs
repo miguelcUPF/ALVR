@@ -241,13 +241,6 @@ impl StatisticsManager {
         bytes: usize,
         is_idr: bool,
     ) -> Duration {
-        warn!(
-            "frame {} encoded now {:?} bytes {}",
-            target_timestamp.as_secs_f64(),
-            Instant::now(),
-            bytes
-        ); // remove
-
         let now = Instant::now();
 
         if let Some(frame) = self.history_buffer.iter_mut().find(|frame| {
@@ -288,10 +281,6 @@ impl StatisticsManager {
 
             frame_interval_encode
         } else {
-            warn!(
-                "frame encoded {} not found ",
-                target_timestamp.as_secs_f64()
-            ); // remove
             Duration::ZERO
         }
     }
@@ -310,16 +299,12 @@ impl StatisticsManager {
         self.partial_sum_frames_sent += 1;
         self.partial_sum_bytes_sent += shards_bytes.values().sum::<usize>(); // remove
         self.partial_sum_shards_sent += shards_bytes.values().count(); // remove
-        warn!(
-            "Report frame {} transmitted timestamp {}!",
-            packet_index, target_timestamp.as_secs_f64()
-        ); // remove
+        
         if let Some(frame) = self.history_buffer.iter_mut().find(|frame| {
             frame.server_stats.target_timestamp == target_timestamp
                 && frame.server_stats.frame_index == -1
         }) {
             // find the first frame in the buffer associated with the target_timestamp that has not been yet transmitted
-            warn!("Frame {} updating index!", packet_index); // remove
             let last_instant = *shards_instant.values().last().unwrap_or(&Instant::now());
 
             frame.server_stats.frame_interval =
@@ -330,25 +315,6 @@ impl StatisticsManager {
             frame.server_stats.shards_instant = shards_instant;
 
             self.prev_transmission = last_instant;
-        } else {
-            warn!(
-                "Frame {} not found timestamp {} in buffer!",
-                packet_index, target_timestamp.as_secs_f64()
-            ); // remove
-            let packet_indexes: Vec<_> = self
-                .history_buffer
-                .iter()
-                .map(|frame| frame.server_stats.frame_index)
-                .collect(); // remove
-            let timestamps_buff: Vec<_> = self
-                .history_buffer
-                .iter()
-                .map(|frame| frame.server_stats.target_timestamp)
-                .collect(); // remove
-
-            warn!("1_Packet indexes in history buffer: {:?}", packet_indexes); // remove
-            warn!("1_timestamps in history buffer: {:?}", timestamps_buff); // remove
-
         }
     }
 
@@ -448,10 +414,6 @@ impl StatisticsManager {
             self.prev_stats_summary_instant = Instant::now();
             self.report_statistics_summary();
         }
-        warn!(
-            "server try report stats frame {}",
-            client_stats.packet_index
-        ); // remove
 
         let frame = match self
             .history_buffer
@@ -460,13 +422,6 @@ impl StatisticsManager {
         {
             Some(frame_searched) => frame_searched.clone(),
             None => {
-                let packet_indexes: Vec<_> = self
-                    .history_buffer
-                    .iter()
-                    .map(|frame| frame.server_stats.frame_index)
-                    .collect(); // remove
-
-                warn!("Packet indexes in history buffer: {:?}", packet_indexes); // remove
                 warn!(
                     "Frame {} not found in history buffer!",
                     client_stats.packet_index
@@ -474,10 +429,6 @@ impl StatisticsManager {
                 return Duration::ZERO;
             }
         };
-        warn!(
-            "Frame {} server reporting statistics!",
-            client_stats.packet_index
-        ); // remove
 
         let highest_frame_received =
             if frame.server_stats.frame_index == client_stats.highest_frame_index as i32 {

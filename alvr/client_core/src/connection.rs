@@ -414,8 +414,6 @@ fn connection_pipeline(
                         stats.report_video_statistics(header.timestamp, video_stats);
                     }
 
-                    warn!("Video statistics reported for frame {}", data.get_index()); // remove
-
                     reception_interval = Duration::ZERO;
                     bytes_received = 0;
                     shards_received = 0;
