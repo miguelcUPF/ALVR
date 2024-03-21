@@ -259,6 +259,22 @@ impl StatisticsManager {
 
             self.prev_encoding = now;
 
+            // Clean the HistoryFrames related to prior inputs that did not result in a frame
+            let target_timestamps_to_remove: Vec<_> = self
+                .history_buffer
+                .iter()
+                .filter(|frame| {
+                    frame.server_stats.target_timestamp < target_timestamp
+                        && frame.server_stats.frame_index == -1
+                })
+                .map(|frame| frame.server_stats.target_timestamp)
+                .collect();
+
+            // Remove frames from the history_buffer based on collected target timestamps
+            self.history_buffer.retain(|frame| {
+                !target_timestamps_to_remove.contains(&frame.server_stats.target_timestamp)
+            });
+
             frame_interval_encode
         } else if let Some(frame) = self
             .history_buffer
@@ -299,7 +315,7 @@ impl StatisticsManager {
         self.partial_sum_frames_sent += 1;
         self.partial_sum_bytes_sent += shards_bytes.values().sum::<usize>(); // remove
         self.partial_sum_shards_sent += shards_bytes.values().count(); // remove
-        
+
         if let Some(frame) = self.history_buffer.iter_mut().find(|frame| {
             frame.server_stats.target_timestamp == target_timestamp
                 && frame.server_stats.frame_index == -1
