@@ -259,22 +259,6 @@ impl StatisticsManager {
 
             self.prev_encoding = now;
 
-            // Clean the HistoryFrames related to prior inputs that did not result in a frame
-            let target_timestamps_to_remove: Vec<_> = self
-                .history_buffer
-                .iter()
-                .filter(|frame| {
-                    frame.server_stats.target_timestamp < target_timestamp
-                        && frame.server_stats.frame_index == -1
-                })
-                .map(|frame| frame.server_stats.target_timestamp)
-                .collect();
-
-            // Remove frames from the history_buffer based on collected target timestamps
-            self.history_buffer.retain(|frame| {
-                !target_timestamps_to_remove.contains(&frame.server_stats.target_timestamp)
-            });
-
             frame_interval_encode
         } else if let Some(frame) = self
             .history_buffer
@@ -332,6 +316,12 @@ impl StatisticsManager {
 
             self.prev_transmission = last_instant;
         }
+
+        // Clean the HistoryFrames related to prior inputs that did not result in a frame transmission
+        self.history_buffer.retain(|frame| {
+            !(frame.server_stats.target_timestamp < target_timestamp
+                && frame.server_stats.frame_index == -1)
+        });
     }
 
     pub fn report_battery(&mut self, device_id: u64, gauge_value: f32, is_plugged: bool) {
@@ -431,9 +421,16 @@ impl StatisticsManager {
             self.report_statistics_summary();
         }
 
+        let indexes: Vec<_> = self
+            .history_buffer
+            .iter()
+            .map(|frame| frame.server_stats.frame_index)
+            .collect(); //remove
+        warn!("{}_{:?}", client_stats.packet_index, indexes); //remove
+
         let frame = match self
             .history_buffer
-            .iter_mut()
+            .iter()
             .find(|frame| frame.server_stats.frame_index == client_stats.packet_index as i32)
         {
             Some(frame_searched) => frame_searched.clone(),
@@ -451,7 +448,7 @@ impl StatisticsManager {
                 frame.clone()
             } else {
                 self.history_buffer
-                    .iter_mut()
+                    .iter()
                     .find(|frame_| {
                         frame_.server_stats.frame_index == client_stats.highest_frame_index as i32
                     })
