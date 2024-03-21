@@ -1,5 +1,5 @@
 use crate::connection::VideoStatistics;
-use alvr_common::{warn, SlidingWindowAverage};
+use alvr_common:: SlidingWindowAverage;
 use alvr_packets::ClientStatistics;
 use std::{
     collections::VecDeque,
@@ -164,59 +164,26 @@ impl StatisticsManager {
 
                 frame_interval_decode = now.saturating_duration_since(prev_decode);
                 frame.client_stats.frame_interval_decode = frame_interval_decode;
-                warn!(
-                    "1_frame decoded statistics updated for frame {} with prev_decode {:?}",
-                    target_timestamp.as_secs_f64(),
-                    prev_decode
-                ); // remove
             } else {
                 frame_decoded = frame.frame_decoded;
                 video_decode = frame.client_stats.video_decode;
                 frame_interval_decode = frame.client_stats.frame_interval_decode;
             }
-        } else {
-            warn!(
-                "1_frame_not found timestamp {}",
-                target_timestamp.as_secs_f64()
-            ); // remove
         }
-
         // stats buffer instead of history buffer since this happens after report_video_statisticcs()
-        let mut count = 0; // remove
         for frame in self
             .stats_hist_buffer
             .iter_mut()
             .filter(|frame| frame.client_stats.target_timestamp == target_timestamp)
         {
-            count += 1;
             if !frame.is_decoded {
                 frame.is_decoded = true;
 
                 frame.frame_decoded = frame_decoded;
                 frame.client_stats.video_decode = video_decode;
                 frame.client_stats.frame_interval_decode = frame_interval_decode;
-
-                warn!(
-                    "2_frame {} timestamp {} interval decode is {}",
-                    frame.client_stats.packet_index,
-                    target_timestamp.as_secs_f64(),
-                    frame_interval_decode.as_secs_f64()
-                ); // remove
             }
             self.prev_decoding = now;
-            warn!(
-                "2_prev decoding updated now {:?} cosdiering frame {}",
-                now, frame.client_stats.packet_index,
-            ); // remove
-        }
-        if count > 1 {
-            warn!(
-                "2_more than one frame with timestamp {}",
-                target_timestamp.as_secs_f64()
-            ); // remove
-        }
-        if count == 0 {
-            warn!("2_not found timestamp {}", target_timestamp.as_secs_f64()); // remove
         }
     }
 
@@ -303,12 +270,6 @@ impl StatisticsManager {
 
                 frame_interval_vsync = vsync.saturating_duration_since(prev_vsync);
                 frame.client_stats.frame_interval_vsync = frame_interval_vsync;
-
-                warn!(
-                    "3_frame submit statistics updated for frame {} with prev_vsync {:?}",
-                    target_timestamp.as_secs_f64(),
-                    prev_vsync
-                ); // remove
             } else {
                 frame_vsync_queue = frame.client_stats.vsync_queue;
                 rendering = frame.client_stats.rendering;
@@ -332,18 +293,8 @@ impl StatisticsManager {
                 frame.client_stats.total_pipeline_latency = total_pipeline_latency;
                 frame.frame_displayed = frame_displayed;
                 frame.client_stats.frame_interval_vsync = frame_interval_vsync;
-                warn!(
-                    "3_frame {} timestamp {} interval vsync is {}",
-                    frame.client_stats.packet_index,
-                    target_timestamp.as_secs_f64(),
-                    frame_interval_vsync.as_secs_f64()
-                ); // remove
             }
             self.prev_vsync = vsync;
-            warn!(
-                "4_prev vsync updated now {:?} cosdiering frame {}",
-                now, frame.client_stats.packet_index,
-            ); // remove
         }
     }
 
