@@ -31,7 +31,7 @@ use std::{
     mem,
     net::{IpAddr, TcpListener, UdpSocket},
     sync::{mpsc, Arc},
-    time::{Instant,Duration},
+    time::{Duration, Instant},
 };
 
 const SHARD_PREFIX_SIZE: usize = mem::size_of::<u32>() // shard length - field itself (4 bytes)
@@ -230,7 +230,6 @@ impl<H> ReceiverData<H> {
         self.had_packet_skip
     }
 
-    
     pub fn get_index(&self) -> u32 {
         self.index
     }
@@ -407,7 +406,7 @@ impl<H: DeserializeOwned + Serialize> StreamReceiver<H> {
                 return alvr_common::try_again();
             }
         }
-        
+
         self.next_packet_index = packet.index.wrapping_add(1);
 
         Ok(ReceiverData {
@@ -594,7 +593,6 @@ struct StreamRecvComponents {
     in_progress_packets: HashMap<u32, InProgressPacket>,
     discarded_shards_sink: InProgressPacket,
 }
-
 
 #[derive(Clone, Copy)]
 pub struct VideoPacketMetrics {
@@ -790,6 +788,21 @@ impl StreamSocket {
             let shards_count = u32::from_be_bytes(bytes[10..14].try_into().unwrap()) as usize;
             let shard_index = u32::from_be_bytes(bytes[14..18].try_into().unwrap()) as usize;
 
+            if stream_id == VIDEO {
+                self.video_stream_stats.last_packet_metrics.bytes_received += shard_length;
+
+                self.video_stream_stats.last_packet_metrics.shards_received += 1;
+
+                if self.video_stream_stats.highest_packet_index == packet_index {
+                    if self.video_stream_stats.highest_shard_index < shard_index {
+                        self.video_stream_stats.highest_shard_index = shard_index;
+                    }
+                } else if self.video_stream_stats.highest_packet_index < packet_index {
+                    self.video_stream_stats.highest_packet_index = packet_index;
+                    self.video_stream_stats.highest_shard_index = shard_index;
+                }
+            }
+
             self.shard_recv_state.insert(RecvState {
                 shard_length,
                 stream_id,
@@ -801,25 +814,6 @@ impl StreamSocket {
                 should_discard: false,
             })
         };
-
-        if shard_recv_state_mut.stream_id == VIDEO {
-            self.video_stream_stats.last_packet_metrics.bytes_received +=
-                shard_recv_state_mut.shard_length;
-
-            self.video_stream_stats.last_packet_metrics.shards_received += 1;
-
-            if self.video_stream_stats.highest_packet_index == shard_recv_state_mut.packet_index {
-                if self.video_stream_stats.highest_shard_index < shard_recv_state_mut.shard_index {
-                    self.video_stream_stats.highest_shard_index = shard_recv_state_mut.shard_index;
-                }
-            } else if self.video_stream_stats.highest_packet_index
-                < shard_recv_state_mut.packet_index
-            {
-                self.video_stream_stats.highest_packet_index = shard_recv_state_mut.packet_index;
-                self.video_stream_stats.highest_shard_index = shard_recv_state_mut.shard_index;
-            }
-        }
-
 
         let Some(components) = self
             .stream_recv_components
@@ -872,7 +866,7 @@ impl StreamSocket {
                 self.video_stream_stats.last_packet_metrics.shards_dropped += 1;
                 warn!(
                     "Dropped shard {} from video packet {} because the stream thread has hung!",
-                shard_recv_state_mut.shard_index, shard_recv_state_mut.packet_index
+                    shard_recv_state_mut.shard_index, shard_recv_state_mut.packet_index
                 );
             }
             &mut components.discarded_shards_sink
@@ -924,7 +918,6 @@ impl StreamSocket {
         }
 
         if !shard_recv_state_mut.should_discard {
-
             if !in_progress_packet
                 .received_shard_indices
                 .contains(&shard_recv_state_mut.shard_index)
@@ -1044,8 +1037,9 @@ impl StreamSocket {
                     video_packet_metrics,
                 })
                 .ok();
-
-            self.video_stream_stats.last_packet_metrics = VideoPacketMetrics::default();
+            if shard_recv_state_mut.stream_id == VIDEO {
+                self.video_stream_stats.last_packet_metrics = VideoPacketMetrics::default();
+            }
 
             // Keep only shards with later packet index (using wrapping logic)
             while let Some((idx, _)) = components.in_progress_packets.iter().find(|(idx, _)| {
