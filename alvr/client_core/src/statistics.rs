@@ -1,5 +1,5 @@
 use crate::connection::VideoStatistics;
-use alvr_common::SlidingWindowAverage;
+use alvr_common::{warn, SlidingWindowAverage};
 use alvr_packets::ClientStatistics;
 use std::{
     collections::VecDeque,
@@ -140,81 +140,210 @@ impl StatisticsManager {
     }
 
     pub fn report_frame_decoded(&mut self, target_timestamp: Duration) {
+        let now = Instant::now();
+        let prev_decode = self.prev_decoding;
+
+        let mut frame_decoded = Instant::now();
+        let mut video_decode = Duration::ZERO;
+        let mut frame_interval_decode = Duration::ZERO;
+
+        if let Some(frame) = self
+            .history_buffer
+            .iter_mut()
+            .find(|frame| frame.client_stats.target_timestamp == target_timestamp)
+        {
+            // this is to keep the same latency statistics for frames with same timestamp
+            if !frame.is_decoded {
+                frame.is_decoded = true;
+
+                frame_decoded = now;
+                frame.frame_decoded = frame_decoded;
+
+                video_decode = now.saturating_duration_since(frame.frame_received);
+                frame.client_stats.video_decode = video_decode;
+
+                frame_interval_decode = now.saturating_duration_since(prev_decode);
+                frame.client_stats.frame_interval_decode = frame_interval_decode;
+                warn!(
+                    "1_frame decoded statistics updated for frame {} with prev_decode {:?}",
+                    target_timestamp.as_secs_f64(),
+                    prev_decode
+                ); // remove
+            } else {
+                frame_decoded = frame.frame_decoded;
+                video_decode = frame.client_stats.video_decode;
+                frame_interval_decode = frame.client_stats.frame_interval_decode;
+            }
+        } else {
+            warn!(
+                "1_frame_not found timestamp {}",
+                target_timestamp.as_secs_f64()
+            ); // remove
+        }
+
         // stats buffer instead of history buffer since this happens after report_video_statisticcs()
+        let mut count = 0; // remove
         for frame in self
             .stats_hist_buffer
             .iter_mut()
             .filter(|frame| frame.client_stats.target_timestamp == target_timestamp)
         {
-            let now = Instant::now();
-
+            count += 1;
             if !frame.is_decoded {
                 frame.is_decoded = true;
-                frame.frame_decoded = now;
 
-                frame.client_stats.video_decode =
-                    now.saturating_duration_since(frame.frame_received);
+                frame.frame_decoded = frame_decoded;
+                frame.client_stats.video_decode = video_decode;
+                frame.client_stats.frame_interval_decode = frame_interval_decode;
 
-                frame.client_stats.frame_interval_decode =
-                    now.saturating_duration_since(self.prev_decoding);
+                warn!(
+                    "2_frame {} timestamp {} interval decode is {}",
+                    frame.client_stats.packet_index,
+                    target_timestamp.as_secs_f64(),
+                    frame_interval_decode.as_secs_f64()
+                ); // remove
             }
-
             self.prev_decoding = now;
+            warn!(
+                "2_prev decoding updated now {:?} cosdiering frame {}",
+                now, frame.client_stats.packet_index,
+            ); // remove
+        }
+        if count > 1 {
+            warn!(
+                "2_more than one frame with timestamp {}",
+                target_timestamp.as_secs_f64()
+            ); // remove
+        }
+        if count == 0 {
+            warn!("2_not found timestamp {}", target_timestamp.as_secs_f64()); // remove
         }
     }
 
     pub fn report_compositor_start(&mut self, target_timestamp: Duration) {
-        // stats buffer instead of history buffer since this happens after report_video_statisticcs()
-        for frame in self
-            .stats_hist_buffer
-            .iter_mut()
-            .filter(|frame| frame.client_stats.target_timestamp == target_timestamp)
-        {
-            let now = Instant::now();
+        let now = Instant::now();
 
+        let mut frame_composed = Instant::now();
+        let mut video_decoder_queue = Duration::ZERO;
+
+        if let Some(frame) = self
+            .history_buffer
+            .iter_mut()
+            .find(|frame| frame.client_stats.target_timestamp == target_timestamp)
+        {
+            // this is to keep the same latency statistics for frames with same timestamp
             if !frame.is_composed {
                 frame.is_composed = true;
+
+                frame_composed = now;
                 frame.frame_composed = now;
 
-                frame.client_stats.video_decoder_queue = now.saturating_duration_since(
+                video_decoder_queue = now.saturating_duration_since(
                     frame.frame_received + frame.client_stats.video_decode,
                 );
+                frame.client_stats.video_decoder_queue = video_decoder_queue;
+            } else {
+                frame_composed = frame.frame_composed;
+                video_decoder_queue = frame.client_stats.video_decoder_queue;
             }
+        }
+
+        // stats buffer instead of history buffer since this happens after report_video_statisticcs()
+        for frame in self.stats_hist_buffer.iter_mut().filter(|frame| {
+            frame.client_stats.target_timestamp == target_timestamp && !frame.is_composed
+        }) {
+            frame.is_composed = true;
+
+            frame.frame_composed = frame_composed;
+            frame.client_stats.video_decoder_queue = video_decoder_queue;
         }
     }
 
     // vsync_queue is the latency between this call and the vsync. it cannot be measured by ALVR and
     // should be reported by the VR runtime
     pub fn report_submit(&mut self, target_timestamp: Duration, vsync_queue: Duration) {
+        let now = Instant::now();
+        let vsync = now + vsync_queue;
+        let prev_vsync = self.prev_vsync;
+
+        let mut frame_vsync_queue = Duration::ZERO;
+        let mut rendering = Duration::ZERO;
+        let mut total_pipeline_latency = Duration::ZERO;
+        let mut frame_displayed = Instant::now();
+        let mut frame_interval_vsync = Duration::ZERO;
+
+        if let Some(frame) = self
+            .history_buffer
+            .iter_mut()
+            .find(|frame| frame.client_stats.target_timestamp == target_timestamp)
+        {
+            // this is to keep the same latency statistics for frames with same timestamp
+            if !frame.is_displayed {
+                frame.is_displayed = true;
+
+                rendering = now.saturating_duration_since(
+                    frame.frame_received
+                        + frame.client_stats.video_decode
+                        + frame.client_stats.video_decoder_queue,
+                );
+                frame.client_stats.rendering = rendering;
+
+                frame_vsync_queue = vsync_queue;
+                frame.client_stats.vsync_queue = frame_vsync_queue;
+
+                total_pipeline_latency =
+                    now.saturating_duration_since(frame.input_acquired) + vsync_queue;
+                frame.client_stats.total_pipeline_latency = total_pipeline_latency;
+
+                self.total_pipeline_latency_average
+                    .submit_sample(frame.client_stats.total_pipeline_latency);
+
+                frame_displayed = vsync;
+                frame.frame_displayed = frame_displayed;
+
+                frame_interval_vsync = vsync.saturating_duration_since(prev_vsync);
+                frame.client_stats.frame_interval_vsync = frame_interval_vsync;
+
+                warn!(
+                    "3_frame submit statistics updated for frame {} with prev_vsync {:?}",
+                    target_timestamp.as_secs_f64(),
+                    prev_vsync
+                ); // remove
+            } else {
+                frame_vsync_queue = frame.client_stats.vsync_queue;
+                rendering = frame.client_stats.rendering;
+                total_pipeline_latency = frame.client_stats.total_pipeline_latency;
+                frame_displayed = frame.frame_displayed;
+                frame_interval_vsync = frame.client_stats.frame_interval_vsync;
+            }
+        }
+
         // stats buffer instead of history buffer since this happens after report_video_statisticcs()
         for frame in self
             .stats_hist_buffer
             .iter_mut()
             .filter(|frame| frame.client_stats.target_timestamp == target_timestamp)
         {
-            let now = Instant::now();
-            let vsync = now + vsync_queue;
-
             if !frame.is_displayed {
                 frame.is_displayed = true;
-                frame.client_stats.rendering = now.saturating_duration_since(
-                    frame.frame_received
-                        + frame.client_stats.video_decode
-                        + frame.client_stats.video_decoder_queue,
-                );
-                frame.client_stats.vsync_queue = vsync_queue;
-                frame.client_stats.total_pipeline_latency =
-                    now.saturating_duration_since(frame.input_acquired) + vsync_queue;
-                self.total_pipeline_latency_average
-                    .submit_sample(frame.client_stats.total_pipeline_latency);
 
-                frame.frame_displayed = vsync;
-
-                frame.client_stats.frame_interval_vsync =
-                    vsync.saturating_duration_since(self.prev_vsync);
+                frame.client_stats.vsync_queue = frame_vsync_queue;
+                frame.client_stats.rendering = rendering;
+                frame.client_stats.total_pipeline_latency = total_pipeline_latency;
+                frame.frame_displayed = frame_displayed;
+                frame.client_stats.frame_interval_vsync = frame_interval_vsync;
+                warn!(
+                    "3_frame {} timestamp {} interval vsync is {}",
+                    frame.client_stats.packet_index,
+                    target_timestamp.as_secs_f64(),
+                    frame_interval_vsync.as_secs_f64()
+                ); // remove
             }
-
             self.prev_vsync = vsync;
+            warn!(
+                "4_prev vsync updated now {:?} cosdiering frame {}",
+                now, frame.client_stats.packet_index,
+            ); // remove
         }
     }
 
