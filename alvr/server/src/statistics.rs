@@ -421,13 +421,6 @@ impl StatisticsManager {
             self.report_statistics_summary();
         }
 
-        let indexes: Vec<_> = self
-            .history_buffer
-            .iter()
-            .map(|frame| frame.server_stats.frame_index)
-            .collect(); //remove
-        warn!("{}_{:?}", client_stats.packet_index, indexes); //remove
-
         let frame = match self
             .history_buffer
             .iter()
