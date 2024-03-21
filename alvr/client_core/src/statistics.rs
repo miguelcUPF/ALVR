@@ -23,7 +23,7 @@ struct HistoryFrame {
 }
 pub struct StatisticsManager {
     history_buffer: VecDeque<HistoryFrame>,
-    stats_buffer: VecDeque<ClientStatistics>, // client statistics for every frame
+    stats_hist_buffer: VecDeque<HistoryFrame>, // since there are several frames with same timestamp
 
     max_history_size: usize,
 
@@ -44,7 +44,7 @@ impl StatisticsManager {
         Self {
             max_history_size,
             history_buffer: VecDeque::new(),
-            stats_buffer: VecDeque::new(),
+            stats_hist_buffer: VecDeque::new(),
             prev_reception: Instant::now(),
             prev_decoding: Instant::now(),
             prev_vsync: Instant::now(),
@@ -84,22 +84,28 @@ impl StatisticsManager {
         if self.history_buffer.len() > self.max_history_size {
             self.history_buffer.pop_back();
         }
-        if self.stats_buffer.len() > self.max_history_size {
-            self.stats_buffer.pop_front();
+        if self.stats_hist_buffer.len() > self.max_history_size {
+            self.stats_hist_buffer.pop_front();
         }
     }
 
     pub fn report_frame_received(&mut self, target_timestamp: Duration) {
-        let now = Instant::now();
+        if let Some(frame) = self
+            .history_buffer
+            .iter_mut()
+            .find(|frame| frame.client_stats.target_timestamp == target_timestamp)
+        {
+            let now = Instant::now();
 
-        if let Some(frame) = self.history_buffer.iter_mut().find(|frame| {
-            frame.client_stats.target_timestamp == target_timestamp && !frame.is_received
-        }) {
-            frame.frame_received = now;
+            if !frame.is_received {
+                frame.is_received = true;
+                frame.frame_received = now;
 
-            frame.client_stats.frame_interval = now.saturating_duration_since(self.prev_reception);
+                frame.client_stats.frame_interval =
+                    now.saturating_duration_since(self.prev_reception);
+            }
+            self.prev_reception = now;
         }
-        self.prev_reception = now;
     }
 
     pub fn report_video_statistics(&mut self, target_timestamp: Duration, stats: VideoStatistics) {
@@ -129,76 +135,109 @@ impl StatisticsManager {
             frame.client_stats.highest_frame_index = stats.highest_frame_index;
             frame.client_stats.highest_shard_index = stats.highest_shard_index;
 
-            self.stats_buffer.push_back(frame.client_stats.clone()) // to keep the statistics for frames with same target_timestamp
+            self.stats_hist_buffer.push_back(frame.clone()) // to keep the statistics for frames with same target_timestamp
         }
     }
 
     pub fn report_frame_decoded(&mut self, target_timestamp: Duration) {
-        let now = Instant::now();
+        // stats buffer instead of history buffer since this happens after report_video_statisticcs()
+        for frame in self
+            .stats_hist_buffer
+            .iter_mut()
+            .filter(|frame| frame.client_stats.target_timestamp == target_timestamp)
+        {
+            let now = Instant::now();
 
-        if let Some(frame) = self.history_buffer.iter_mut().find(|frame| {
-            frame.client_stats.target_timestamp == target_timestamp && !frame.is_decoded
-        }) {
-            frame.frame_decoded = now;
+            if !frame.is_decoded {
+                frame.is_decoded = true;
+                frame.frame_decoded = now;
 
-            frame.client_stats.video_decode = now.saturating_duration_since(frame.frame_received);
+                frame.client_stats.video_decode =
+                    now.saturating_duration_since(frame.frame_received);
 
-            frame.client_stats.frame_interval_decode =
-                now.saturating_duration_since(self.prev_decoding);
+                frame.client_stats.frame_interval_decode =
+                    now.saturating_duration_since(self.prev_decoding);
+            }
+
+            self.prev_decoding = now;
         }
-        self.prev_decoding = now;
     }
 
     pub fn report_compositor_start(&mut self, target_timestamp: Duration) {
-        let now = Instant::now();
+        // stats buffer instead of history buffer since this happens after report_video_statisticcs()
+        for frame in self
+            .stats_hist_buffer
+            .iter_mut()
+            .filter(|frame| frame.client_stats.target_timestamp == target_timestamp)
+        {
+            let now = Instant::now();
 
-        if let Some(frame) = self.history_buffer.iter_mut().find(|frame| {
-            frame.client_stats.target_timestamp == target_timestamp && !frame.is_composed
-        }) {
-            frame.frame_composed = now;
+            if !frame.is_composed {
+                frame.is_composed = true;
+                frame.frame_composed = now;
 
-            frame.client_stats.video_decoder_queue = now
-                .saturating_duration_since(frame.frame_received + frame.client_stats.video_decode);
+                frame.client_stats.video_decoder_queue = now.saturating_duration_since(
+                    frame.frame_received + frame.client_stats.video_decode,
+                );
+            }
         }
     }
 
     // vsync_queue is the latency between this call and the vsync. it cannot be measured by ALVR and
     // should be reported by the VR runtime
     pub fn report_submit(&mut self, target_timestamp: Duration, vsync_queue: Duration) {
-        let now = Instant::now();
-        let vsync = now + vsync_queue;
+        // stats buffer instead of history buffer since this happens after report_video_statisticcs()
+        for frame in self
+            .stats_hist_buffer
+            .iter_mut()
+            .filter(|frame| frame.client_stats.target_timestamp == target_timestamp)
+        {
+            let now = Instant::now();
+            let vsync = now + vsync_queue;
 
-        if let Some(frame) = self.history_buffer.iter_mut().find(|frame| {
-            frame.client_stats.target_timestamp == target_timestamp && !frame.is_displayed
-        }) {
-            frame.client_stats.rendering = now.saturating_duration_since(
-                frame.frame_received
-                    + frame.client_stats.video_decode
-                    + frame.client_stats.video_decoder_queue,
-            );
-            frame.client_stats.vsync_queue = vsync_queue;
-            frame.client_stats.total_pipeline_latency =
-                now.saturating_duration_since(frame.input_acquired) + vsync_queue;
-            self.total_pipeline_latency_average
-                .submit_sample(frame.client_stats.total_pipeline_latency);
+            if !frame.is_displayed {
+                frame.is_displayed = true;
+                frame.client_stats.rendering = now.saturating_duration_since(
+                    frame.frame_received
+                        + frame.client_stats.video_decode
+                        + frame.client_stats.video_decoder_queue,
+                );
+                frame.client_stats.vsync_queue = vsync_queue;
+                frame.client_stats.total_pipeline_latency =
+                    now.saturating_duration_since(frame.input_acquired) + vsync_queue;
+                self.total_pipeline_latency_average
+                    .submit_sample(frame.client_stats.total_pipeline_latency);
 
-            frame.frame_displayed = vsync;
+                frame.frame_displayed = vsync;
 
-            frame.client_stats.frame_interval_vsync =
-                vsync.saturating_duration_since(self.prev_vsync);
+                frame.client_stats.frame_interval_vsync =
+                    vsync.saturating_duration_since(self.prev_vsync);
+            }
+
+            self.prev_vsync = vsync;
         }
-        self.prev_vsync = vsync;
     }
 
     pub fn summary(&mut self, target_timestamp: Duration) -> Option<ClientStatistics> {
         if let Some(index) = self
-            .stats_buffer
+            .stats_hist_buffer
             .iter()
-            .position(|client_stats| client_stats.target_timestamp == target_timestamp)
+            .position(|frame| frame.client_stats.target_timestamp == target_timestamp)
         {
-            let client_stats = self.stats_buffer.remove(index);
-            warn!("summary sent for frame {}", client_stats.clone().unwrap().packet_index ); // remove
-            client_stats
+            if let Some(frame) = self.stats_hist_buffer.remove(index) {
+                let client_stats = frame.client_stats;
+                warn!(
+                    "summary sent for frame {}",
+                    client_stats.packet_index
+                ); // remove
+                warn!(
+                    "summary sent with following video decode stats {}",
+                    client_stats.video_decode.as_secs_f64()
+                ); // remove
+                Some(client_stats)
+            } else {
+                None
+            }
         } else {
             None
         }
